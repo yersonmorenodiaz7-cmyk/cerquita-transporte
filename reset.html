@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CERQUITA · Nueva contraseña</title>
+<style>
+:root{--bg:#f4f6f8;--fg:#10181f;--card:#fff;--br:#dfe4e9;--mut:#66727e;--acc:#1769ff}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1419;--fg:#eef2f5;--card:#18212a;--br:#2a3541;--mut:#93a0ac}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.w{max-width:420px;margin:12vh auto;padding:0 16px}.logo{font-weight:800;font-size:26px;color:var(--acc);margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--br);border-radius:14px;padding:18px}
+input{width:100%;padding:12px;border:1px solid var(--br);border-radius:10px;background:var(--bg);color:var(--fg);font:inherit;margin:8px 0}
+button{width:100%;padding:13px;border:0;border-radius:12px;background:var(--acc);color:#fff;font:inherit;font-weight:700;cursor:pointer;margin-top:6px}
+.mut{color:var(--mut);font-size:14px}.err{color:#d92d3a;font-size:14px}.ok{color:#12a150;font-weight:700}
+</style></head>
+<body><div class="w"><div class="logo">📍 CERQUITA</div><div class="card" id="box"><p class="mut">Abre esta página desde el enlace que te llegó al correo.</p></div></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script>
+const sb=supabase.createClient('https://bwcluuunbaxpmdpscekg.supabase.co','eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ3Y2x1dXVuYmF4cG1kcHNjZWtnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMzODM3NDYsImV4cCI6MjEwODk1OTc0Nn0.0Pi0yGf_fHVBjWJJdlkxO6yVvEa1_RBY4-izbsMCDCs');
+const box=document.getElementById('box');
+function form(){box.innerHTML='<h3 style="margin:0 0 6px">Crea tu nueva contraseña</h3><input id="p1" type="password" placeholder="Nueva contraseña (mínimo 8 caracteres)"><input id="p2" type="password" placeholder="Repite la contraseña"><div class="err" id="e"></div><button onclick="save()">Guardar contraseña</button>'}
+async function save(){const a=document.getElementById('p1').value,b=document.getElementById('p2').value,e=document.getElementById('e');
+  if(a.length<8){e.textContent='La contraseña debe tener mínimo 8 caracteres.';return}
+  if(a!==b){e.textContent='Las contraseñas no coinciden.';return}
+  const{error}=await sb.auth.updateUser({password:a});
+  if(error){e.textContent=error.message;return}
+  await sb.auth.signOut();
+  box.innerHTML='<p class="ok">¡Listo! Tu contraseña fue cambiada.</p><p class="mut">Ya puedes volver a la app de CERQUITA e ingresar con tu nueva contraseña.</p>'}
+sb.auth.onAuthStateChange((ev)=>{if(ev==='PASSWORD_RECOVERY')form()});
+</script></body></html>
