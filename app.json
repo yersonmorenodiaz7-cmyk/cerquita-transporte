@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "CERQUITA",
+    "slug": "cerquita",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "plugins": ["expo-location"],
+    "android": {
+      "package": "co.cerquita.app",
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"],
+      "config": {
+        "googleMaps": { "apiKey": "AIzaSyCJE1yH0oFONZmj_AecTNLSEo9F7pOQTsQ" }
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "co.cerquita.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "CERQUITA usa tu ubicación para conectar pasajeros y conductores cercanos."
+      }
+    }
+  }
+}
