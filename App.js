@@ -1,6 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Platform, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity as T, View } from 'react-native';
+import { ActivityIndicator, Alert, Linking, Platform, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity as T, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import MapView, { Marker, Polyline } from 'react-native-maps';
@@ -106,7 +106,7 @@ function Main({ user }) {
       dh = (await q(supabase.from('payments').select('amount,commission_amount,rides!inner(driver_id,status)').eq('rides.driver_id', drv.id).eq('rides.status', 'completed').limit(100))) || [];
       plan = ((await q(supabase.from('driver_subscriptions').select('ends_at,plans(name,commission_pct)').eq('driver_id', drv.id).gt('ends_at', new Date().toISOString()).order('ends_at', { ascending: false }).limit(1))) || [])[0] || null;
     }
-    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan });
+    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan, rides });
   }, [uid]);
 
   useEffect(() => {
@@ -140,6 +140,25 @@ function Main({ user }) {
       {role === 'd' && <Driver {...props} />}
       {role === 'a' && <ScrollView contentContainerStyle={{ padding: 12 }}><Card><Text style={s.h}>Administración</Text><Mut>El panel de administración (conductores, tarifas, viajes y alertas) está en la versión web.</Mut><Btn t="Abrir panel web" color="#6d4aff" onPress={() => Linking.openURL(WEB)} style={{ marginTop: 10 }} /></Card></ScrollView>}
     </View>
+  );
+}
+
+// ===== Historial de viajes y comprobante =====
+function History({ rides = [] }) {
+  const list = rides.filter(x => ['completed', 'cancelled', 'expired'].includes(x.status)).slice(0, 10);
+  if (!list.length) return null;
+  const share = x => Share.share({ message: `Comprobante CERQUITA\nFecha: ${new Date(x.created_at).toLocaleString('es-CO')}\nRuta: ${x.origin_name} → ${x.dest_name}\nDistancia: ${x.distance_km} km\nTarifa acordada: ${$c(x.agreed_fare)}\nPago: ${x.payment_method}\nEstado: ${ST[x.status]}` });
+  return (
+    <Card>
+      <Text style={s.h}>Mis viajes</Text>
+      {list.map(x => (
+        <View key={x.id} style={s.offer}>
+          <View style={{ flex: 1 }}><Text style={{ fontWeight: '700' }}>{x.origin_name} → {x.dest_name}</Text><Mut>{new Date(x.created_at).toLocaleDateString('es-CO')} · {ST[x.status]}</Mut></View>
+          <Text style={{ fontWeight: '800', marginHorizontal: 8 }}>{x.agreed_fare ? $c(x.agreed_fare) : '—'}</Text>
+          {x.status === 'completed' && <Btn t="Comprobante" ghost small onPress={() => share(x)} />}
+        </View>
+      ))}
+    </Card>
   );
 }
 
@@ -255,6 +274,10 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
   const sos = async () => { if (await m(supabase.from('sos_alerts').insert({ ride_id: r?.id, user_id: uid, lat: o?.lat, lng: o?.lng }))) Alert.alert('CERQUITA', 'Alerta enviada al centro de operaciones.'); };
 
   const veh = D.pd?.vehicles?.[0];
+  const shareTrip = () => {
+    const at = D.loc || o;
+    Share.share({ message: `Voy en un viaje CERQUITA con ${D.pd?.display_name || 'mi conductor'} (${veh?.model || ''} ${veh?.plate || ''}).\nRuta: ${r.origin_name} → ${r.dest_name}.\n${at ? `Ubicación: https://www.google.com/maps?q=${at.lat},${at.lng}` : ''}` });
+  };
   const A = r ? { lat: r.origin_lat, lng: r.origin_lng } : o, B = r ? { lat: r.dest_lat, lng: r.dest_lng } : d;
   return (
     <View style={{ flex: 1 }}>
@@ -293,6 +316,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
             <Btn t={busy ? 'Enviando…' : 'Proponer mi precio'} onPress={request} />
           </Card>
         )}
+        {!r && <History rides={D.rides} />}
         {r && r.status === 'searching' && (
           <Card>
             <Text style={s.h}>Ofertas recibidas ({D.offers.length}/{cfg.max_offers})</Text>
@@ -323,6 +347,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
             <Mut>Tarifa acordada {$c(r.agreed_fare)} · {r.payment_method}</Mut>
             <View style={[s.row, { marginTop: 10 }]}>
               <Btn t="🆘 Emergencia" color={C.red} small onPress={sos} />
+              <Btn t="📤 Compartir viaje" ghost small onPress={shareTrip} />
               {r.status === 'accepted' && <Btn t="Cancelar" ghost small onPress={() => cancel(r.id)} />}
             </View>
           </Card>
