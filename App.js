@@ -1,17 +1,21 @@
 import 'react-native-url-polyfill/auto';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Platform, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity as T, View } from 'react-native';
+import { ActivityIndicator, Alert, Linking, Platform, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity as T, Vibration, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
+import * as Notifications from 'expo-notifications';
 
 // ===== Configuración (la llave anon es pública; la seguridad la dan las políticas RLS de Supabase) =====
 const SB_URL = 'https://bwcluuunbaxpmdpscekg.supabase.co';
 const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ3Y2x1dXVuYmF4cG1kcHNjZWtnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMzODM3NDYsImV4cCI6MjEwODk1OTc0Nn0.0Pi0yGf_fHVBjWJJdlkxO6yVvEa1_RBY4-izbsMCDCs';
 const WEB = 'https://yersonmorenodiaz7-cmyk.github.io/cerquita-transporte/';
 const supabase = createClient(SB_URL, SB_KEY, { auth: { storage: AsyncStorage, autoRefreshToken: true, persistSession: true, detectSessionInUrl: false } });
+
+// Las notificaciones locales suenan y vibran aunque la app esté en segundo plano
+Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowAlert: true, shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }) });
 
 const C = { p: '#1769ff', d: '#12a150', bg: '#f4f6f8', card: '#fff', br: '#dfe4e9', mut: '#66727e', fg: '#10181f', red: '#d92d3a' };
 const ST = { searching: 'Buscando ofertas', accepted: 'Conductor en camino', arrived: 'Tu conductor llegó', ongoing: 'En viaje', completed: 'Viaje finalizado', cancelled: 'Cancelado', expired: 'Expirado' };
@@ -55,7 +59,7 @@ export default function App() {
 function Auth() {
   const [up, setUp] = useState(false), [email, setEmail] = useState(''), [pass, setPass] = useState(''), [name, setName] = useState(''), [busy, setBusy] = useState(false);
   const go = async () => {
-    if (!email || pass.length < 6) return Alert.alert('CERQUITA', 'Escribe tu correo y una contraseña de mínimo 6 caracteres.');
+    if (!email || pass.length < 8) return Alert.alert('CERQUITA', 'Escribe tu correo y una contraseña de mínimo 8 caracteres.');
     setBusy(true);
     if (!up) { const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pass }); if (error) Alert.alert('CERQUITA', error.message); }
     else {
@@ -63,6 +67,11 @@ function Auth() {
       if (error) Alert.alert('CERQUITA', error.message); else if (!data.session) Alert.alert('CERQUITA', 'Cuenta creada. Revisa tu correo para confirmarla y luego ingresa.');
     }
     setBusy(false);
+  };
+  const forgot = async () => {
+    if (!email.trim()) return Alert.alert('CERQUITA', 'Escribe tu correo arriba y vuelve a tocar este enlace.');
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: WEB + 'reset.html' });
+    Alert.alert('CERQUITA', error ? error.message : 'Te enviamos un correo con un enlace para crear una nueva contraseña.');
   };
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingTop: 80 }} keyboardShouldPersistTaps="handled">
@@ -75,6 +84,7 @@ function Auth() {
         <Input placeholder="Contraseña" value={pass} onChangeText={setPass} secureTextEntry />
         <Btn t={busy ? 'Un momento…' : up ? 'Registrarme' : 'Entrar'} onPress={go} />
         <Btn t={up ? 'Ya tengo cuenta' : 'Crear cuenta'} ghost onPress={() => setUp(!up)} style={{ marginTop: 8 }} />
+        {!up && <T onPress={forgot}><Text style={{ color: C.p, textAlign: 'center', marginTop: 14 }}>¿Olvidaste tu contraseña?</Text></T>}
       </Card>
     </ScrollView>
   );
@@ -242,6 +252,19 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
     else if (o && d) mr.current?.fitToCoordinates([pt(o), pt(d)], { edgePadding: pad, animated: true });
   }, [d, r?.id]);
 
+  const [near, setNear] = useState([]);
+  useEffect(() => {
+    if (!o || r) return;
+    let alive = true;
+    const load = async () => {
+      const { data } = await supabase.rpc('nearby_drivers', { p_lat: o.lat, p_lng: o.lng, p_category: c });
+      if (alive && data) setNear(data);
+    };
+    load();
+    const t = setInterval(load, 10000);
+    return () => { alive = false; clearInterval(t); };
+  }, [o?.lat, o?.lng, c, r?.id]);
+
   const k = (() => {
     if (!o || !d || !cats[c]) return null;
     const km = Math.max(.3, hav(o, d) * 1.3), kk = Math.round(km * 10) / 10, cc = cats[c];
@@ -295,6 +318,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
         {B && <Marker coordinate={pt(B)} pinColor="red" title="Destino" />}
         {A && B && <Polyline coordinates={[pt(A), pt(B)]} strokeColor={C.p} strokeWidth={3} />}
         {D.loc && <Marker coordinate={pt(D.loc)} title="Tu conductor"><Text style={{ fontSize: 28 }}>🚕</Text></Marker>}
+        {!r && near.map((x, i) => <Marker key={i} coordinate={pt(x)} title="Conductor cercano"><Text style={{ fontSize: 22 }}>🚕</Text></Marker>)}
       </MapView>
       <ScrollView contentContainerStyle={{ padding: 12 }}>
         {!r && (
@@ -315,6 +339,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginVertical: 10 }}>
               {Object.values(cats).map(x => <Chip key={x.code} t={x.name.replace('CERQUITA ', '')} on={c === x.code} color={C.p} onPress={() => { setC(x.code); setPr(null); }} />)}
             </ScrollView>
+            <Mut>{near.length ? `🚕 ${near.length} conductor(es) cerca de ti` : 'Aún no hay conductores conectados cerca de ti'}</Mut>
             {k && <>
               <Mut>{k.km} km · ~{k.min} min · Referencia {$c(k.ref)} (puedes ofertar entre {$c(k.lo)} y {$c(k.hi)})</Mut>
               <View style={s.row}><Btn t="−" ghost small onPress={() => setPr(Math.max(500, price - 500))} /><Text style={s.price}>{$c(price)}</Text><Btn t="+" ghost small onPress={() => setPr(price + 500)} /></View>
@@ -415,12 +440,13 @@ function Docs({ drv, docs = [], refresh }) {
 }
 
 // ===== Conductor =====
-function Req({ r, mine, onOffer, onHide }) {
+function Req({ r, mine, pos, onOffer, onHide }) {
   const [v, setV] = useState('');
   return (
     <Card>
       <View style={s.row}><Text style={{ fontWeight: '700', flex: 1 }}>{r.origin_name} → {r.dest_name}</Text><Text style={{ fontWeight: '800' }}>{$c(r.offered_fare)}</Text></View>
       <Mut>{r.distance_km} km · ~{r.est_minutes} min · Referencia {$c(r.reference_fare)}</Mut>
+      {pos && <Mut>📍 El pasajero está a {(hav(pos, { lat: r.origin_lat, lng: r.origin_lng }) * 1.3).toFixed(1)} km de ti · llegas en ~{Math.max(1, Math.ceil(hav(pos, { lat: r.origin_lat, lng: r.origin_lng }) * 1.3 / 24 * 60))} min</Mut>}
       {mine ? <Mut>Oferta enviada por {$c(mine.price)}. Esperando al pasajero…</Mut> : (
         <View style={{ marginTop: 8 }}>
           <Btn t={`Aceptar ${$c(r.offered_fare)}`} color={C.d} small onPress={() => onOffer(r.id, r.offered_fare)} />
@@ -437,18 +463,46 @@ function Req({ r, mine, onOffer, onHide }) {
 
 function Driver({ uid, cfg, cats, D, refresh }) {
   const drv = D.drv;
-  const [f, setF] = useState({ name: '', cat: 'carro', model: '', plate: '', color: '' }), [hid, setHid] = useState([]);
+  const [f, setF] = useState({ name: '', cat: 'carro', model: '', plate: '', color: '' }), [hid, setHid] = useState([]), [pos, setPos] = useState(null);
   useEffect(() => {
     if (!drv?.online) return;
     let sub, alive = true;
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted' || !alive) return;
-      sub = await Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 }, l =>
-        m(supabase.from('driver_locations').upsert({ driver_id: drv.id, lat: l.coords.latitude, lng: l.coords.longitude, heading: l.coords.heading, updated_at: new Date().toISOString() })));
+      const save = c => { setPos({ lat: c.latitude, lng: c.longitude }); return m(supabase.from('driver_locations').upsert({ driver_id: drv.id, lat: c.latitude, lng: c.longitude, heading: c.heading, updated_at: new Date().toISOString() })); };
+      try { await save((await Location.getCurrentPositionAsync({})).coords); } catch (e) { Alert.alert('CERQUITA', 'Activa el GPS para recibir solicitudes cercanas.'); }
+      if (!alive) return;
+      sub = await Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 }, l => save(l.coords));
     })();
     return () => { alive = false; sub?.remove(); };
   }, [drv?.online, drv?.id]);
+
+  // Aviso con sonido y vibración cuando llega una solicitud nueva cercana
+  const seen = useRef(null);
+  const idsKey = (D.req || []).filter(x => !hid.includes(x.id)).map(x => x.id).join(',');
+  useEffect(() => {
+    if (!drv?.online) { seen.current = null; return; }
+    (async () => {
+      try {
+        await Notifications.requestPermissionsAsync();
+        if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('solicitudes', { name: 'Solicitudes de viaje', importance: Notifications.AndroidImportance.MAX, vibrationPattern: [0, 500, 300, 500], sound: 'default' });
+      } catch (e) {}
+    })();
+  }, [drv?.online]);
+  useEffect(() => {
+    if (!drv?.online) return;
+    const cur = (D.req || []).filter(x => !hid.includes(x.id));
+    if (seen.current === null) seen.current = new Set();
+    const fresh = cur.filter(x => !seen.current.has(x.id));
+    cur.forEach(x => seen.current.add(x.id));
+    if (!fresh.length) return;
+    Vibration.vibrate([0, 600, 300, 600, 300, 600]);
+    Notifications.scheduleNotificationAsync({
+      content: { title: '🚕 Nueva solicitud cercana', body: `${fresh[0].origin_name} → ${fresh[0].dest_name} · ${$c(fresh[0].offered_fare)}`, sound: true },
+      trigger: Platform.OS === 'android' ? { channelId: 'solicitudes' } : null,
+    }).catch(() => {});
+  }, [idsKey, drv?.online]);
 
   const register = async () => {
     if (!f.name.trim() || !f.model.trim() || !f.plate.trim()) return Alert.alert('CERQUITA', 'Completa nombre, vehículo y placa.');
@@ -509,8 +563,8 @@ function Driver({ uid, cfg, cats, D, refresh }) {
           </Card>
         ) : !drv.online ? <Mut>Conéctate para recibir solicitudes cercanas.</Mut> : (
           <>
-            {list.length === 0 && <Mut>Sin solicitudes por ahora. Se actualizan en tiempo real.</Mut>}
-            {list.map(x => <Req key={x.id} r={x} mine={D.mo.find(o => o.ride_id === x.id)} onOffer={offer} onHide={id => setHid([...hid, id])} />)}
+            {list.length === 0 && <Mut>Sin solicitudes cercanas por ahora ({cfg.search_radius_km} km a la redonda). Solo recibes solicitudes de {cats[drv.category]?.name}. Se actualizan en tiempo real.</Mut>}
+            {list.map(x => <Req key={x.id} r={x} pos={pos} mine={D.mo.find(o => o.ride_id === x.id)} onOffer={offer} onHide={id => setHid([...hid, id])} />)}
           </>
         )}
         {cur && <Chat rideId={cur.id} uid={uid} who={cur.passenger_name || 'el pasajero'} />}
