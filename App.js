@@ -5,6 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
+import * as ImagePicker from 'expo-image-picker';
 
 // ===== Configuración (la llave anon es pública; la seguridad la dan las políticas RLS de Supabase) =====
 const SB_URL = 'https://bwcluuunbaxpmdpscekg.supabase.co';
@@ -99,15 +100,16 @@ function Main({ user }) {
         pay = (await q(supabase.from('payments').select('amount,discount_amount').eq('ride_id', ride.id).maybeSingle())) || null;
       }
     }
-    let req = [], mo = [], cur = null, dh = [], plan = null;
+    let req = [], mo = [], cur = null, dh = [], plan = null, docs = [];
     if (drv) {
       if (drv.online && drv.status === 'approved') req = ((await q(supabase.from('rides').select('*').eq('status', 'searching').eq('category', drv.category).order('created_at', { ascending: false }))) || []).filter(r => r.passenger_id !== uid);
       mo = (await q(supabase.from('offers').select('ride_id,price').eq('driver_id', drv.id))) || [];
+      docs = (await q(supabase.from('driver_documents').select('doc_type,status,created_at').eq('driver_id', drv.id).order('created_at'))) || [];
       cur = ((await q(supabase.from('rides').select('*,payments(commission_amount,discount_amount)').eq('driver_id', drv.id).in('status', ['accepted', 'arrived', 'ongoing']).limit(1))) || [])[0] || null;
       dh = (await q(supabase.from('payments').select('amount,commission_amount,rides!inner(driver_id,status)').eq('rides.driver_id', drv.id).eq('rides.status', 'completed').limit(100))) || [];
       plan = ((await q(supabase.from('driver_subscriptions').select('ends_at,plans(name,commission_pct)').eq('driver_id', drv.id).gt('ends_at', new Date().toISOString()).order('ends_at', { ascending: false }).limit(1))) || [])[0] || null;
     }
-    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan, rides, pay });
+    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan, rides, pay, docs });
   }, [uid]);
 
   useEffect(() => {
@@ -372,6 +374,46 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
   );
 }
 
+// ===== Documentos del conductor (fotos a almacenamiento privado) =====
+const DOC_TYPES = { cedula: 'Cédula', licencia: 'Licencia de conducción', soat: 'SOAT', tecnomecanica: 'Tecnomecánica', tarjeta_propiedad: 'Tarjeta de propiedad', foto: 'Foto del conductor' };
+function Docs({ drv, docs = [], refresh }) {
+  const [sel, setSel] = useState('licencia'), [busy, setBusy] = useState(false);
+  const label = { pending: 'Enviado ✔', approved: 'Aprobado ✅', rejected: 'Rechazado ❌' };
+  const last = t => [...docs].reverse().find(d => d.doc_type === t);
+  const pick = async camera => {
+    try {
+      const perm = camera ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) return Alert.alert('CERQUITA', 'Necesito permiso para usar la cámara o tus fotos.');
+      const res = camera ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6 }) : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.6, mediaTypes: ['images'] });
+      if (res.canceled || !res.assets?.[0]?.base64) return;
+      setBusy(true);
+      const bin = globalThis.atob(res.assets[0].base64), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const path = `${drv.user_id}/${sel}-${Date.now()}.jpg`;
+      const up = await supabase.storage.from('driver-docs').upload(path, bytes.buffer, { contentType: 'image/jpeg' });
+      if (up.error) throw up.error;
+      if (await m(supabase.from('driver_documents').insert({ driver_id: drv.id, doc_type: sel, storage_path: path }))) Alert.alert('CERQUITA', `${DOC_TYPES[sel]} enviado. Un administrador lo revisará.`);
+      refresh();
+    } catch (e) { Alert.alert('CERQUITA', e.message || 'No se pudo subir la foto.'); }
+    setBusy(false);
+  };
+  return (
+    <Card>
+      <Text style={s.h}>Mis documentos</Text>
+      {Object.entries(DOC_TYPES).map(([k, l]) => (
+        <View key={k} style={[s.row, { paddingVertical: 4 }]}><Text>{l}</Text><Text style={{ color: last(k) ? C.fg : C.mut }}>{last(k) ? label[last(k).status] : 'Falta'}</Text></View>
+      ))}
+      <Mut>Elige qué documento vas a subir, y toma la foto o elígela de tu galería.</Mut>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginVertical: 10 }}>
+        {Object.entries(DOC_TYPES).map(([k, l]) => <Chip key={k} t={l} on={sel === k} color={C.d} onPress={() => setSel(k)} />)}
+      </ScrollView>
+      {busy ? <ActivityIndicator color={C.d} /> : (
+        <View style={s.row}><Btn t="📷 Tomar foto" color={C.d} small onPress={() => pick(true)} /><Btn t="🖼️ Elegir de galería" ghost small onPress={() => pick(false)} /></View>
+      )}
+    </Card>
+  );
+}
+
 // ===== Conductor =====
 function Req({ r, mine, onOffer, onHide }) {
   const [v, setV] = useState('');
@@ -429,11 +471,11 @@ function Driver({ uid, cfg, cats, D, refresh }) {
         <Input placeholder="Placa" autoCapitalize="characters" value={f.plate} onChangeText={v => setF({ ...f, plate: v })} />
         <Input placeholder="Color" value={f.color} onChangeText={v => setF({ ...f, color: v })} />
         <Btn t="Enviar registro" color={C.d} onPress={register} />
-        <Mut>Los documentos (cédula, licencia, SOAT) se suben desde la versión web por ahora.</Mut>
+        <Mut>Después de enviar el registro podrás subir las fotos de tus documentos aquí mismo.</Mut>
       </Card>
     </ScrollView>
   );
-  if (drv.status !== 'approved') return <ScrollView contentContainerStyle={{ padding: 12 }}><Card><Text style={s.h}>{drv.display_name}</Text><Text>Estado de tu cuenta: {{ pending: 'pendiente de aprobación', rejected: 'rechazada', suspended: 'suspendida' }[drv.status]}. Un administrador debe revisar tus documentos.</Text></Card></ScrollView>;
+  if (drv.status !== 'approved') return <ScrollView contentContainerStyle={{ padding: 12 }}><Card><Text style={s.h}>{drv.display_name}</Text><Text>Estado de tu cuenta: {{ pending: 'pendiente de aprobación', rejected: 'rechazada', suspended: 'suspendida' }[drv.status]}. Un administrador debe revisar tus documentos.</Text></Card>{drv.status === 'pending' && <Docs drv={drv} docs={D.docs} refresh={refresh} />}</ScrollView>;
 
   const gross = D.dh.reduce((a, x) => a + x.amount, 0), net = gross - D.dh.reduce((a, x) => a + x.commission_amount, 0), v = drv.vehicles?.[0], cur = D.cur;
   const list = D.req.filter(x => !hid.includes(x.id));

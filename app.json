@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "CERQUITA",
+    "slug": "cerquita",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-location",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "CERQUITA necesita tus fotos para subir los documentos del conductor.",
+          "cameraPermission": "CERQUITA necesita la cámara para fotografiar tus documentos."
+        }
+      ]
+    ],
+    "android": {
+      "package": "co.cerquita.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ],
+      "config": {
+        "googleMaps": {
+          "apiKey": "PEGA_AQUI_TU_LLAVE_DE_GOOGLE_MAPS"
+        }
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "co.cerquita.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "CERQUITA usa tu ubicación para conectar pasajeros y conductores cercanos."
+      }
+    }
+  }
+}
