@@ -90,23 +90,24 @@ function Main({ user }) {
     const rides = (await q(supabase.from('rides').select('*').eq('passenger_id', uid).order('created_at', { ascending: false }).limit(30))) || [];
     const rated = new Set(((await q(supabase.from('ratings').select('ride_id').eq('from_user', uid))) || []).map(x => x.ride_id));
     const ride = rides.find(r => ACT.includes(r.status) || (r.status === 'completed' && !rated.has(r.id))) || null;
-    let offers = [], pd = null, loc = null;
+    let offers = [], pd = null, loc = null, pay = null;
     if (ride) {
       if (ride.status === 'searching') offers = (await q(supabase.from('offers').select('*,drivers(display_name,rating_avg,vehicles(model,plate))').eq('ride_id', ride.id).eq('status', 'pending').order('price'))) || [];
       else if (ride.driver_id) {
         pd = (await q(supabase.from('drivers').select('user_id,display_name,rating_avg,vehicles(model,plate)').eq('id', ride.driver_id).maybeSingle())) || null;
         loc = (await q(supabase.from('driver_locations').select('lat,lng').eq('driver_id', ride.driver_id).maybeSingle())) || null;
+        pay = (await q(supabase.from('payments').select('amount,discount_amount').eq('ride_id', ride.id).maybeSingle())) || null;
       }
     }
     let req = [], mo = [], cur = null, dh = [], plan = null;
     if (drv) {
       if (drv.online && drv.status === 'approved') req = ((await q(supabase.from('rides').select('*').eq('status', 'searching').eq('category', drv.category).order('created_at', { ascending: false }))) || []).filter(r => r.passenger_id !== uid);
       mo = (await q(supabase.from('offers').select('ride_id,price').eq('driver_id', drv.id))) || [];
-      cur = ((await q(supabase.from('rides').select('*,payments(commission_amount)').eq('driver_id', drv.id).in('status', ['accepted', 'arrived', 'ongoing']).limit(1))) || [])[0] || null;
+      cur = ((await q(supabase.from('rides').select('*,payments(commission_amount,discount_amount)').eq('driver_id', drv.id).in('status', ['accepted', 'arrived', 'ongoing']).limit(1))) || [])[0] || null;
       dh = (await q(supabase.from('payments').select('amount,commission_amount,rides!inner(driver_id,status)').eq('rides.driver_id', drv.id).eq('rides.status', 'completed').limit(100))) || [];
       plan = ((await q(supabase.from('driver_subscriptions').select('ends_at,plans(name,commission_pct)').eq('driver_id', drv.id).gt('ends_at', new Date().toISOString()).order('ends_at', { ascending: false }).limit(1))) || [])[0] || null;
     }
-    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan, rides });
+    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan, rides, pay });
   }, [uid]);
 
   useEffect(() => {
@@ -221,7 +222,7 @@ function Chat({ rideId, uid, who }) {
 
 // ===== Pasajero =====
 function Passenger({ uid, cfg, cats, D, refresh }) {
-  const [o, setO] = useState(null), [d, setDest] = useState(null), [c, setC] = useState('carro'), [pr, setPr] = useState(null), [pay, setPay] = useState('efectivo'), [busy, setBusy] = useState(false), [oq, setOq] = useState(''), [dq, setDq] = useState('');
+  const [o, setO] = useState(null), [d, setDest] = useState(null), [c, setC] = useState('carro'), [pr, setPr] = useState(null), [pay, setPay] = useState('efectivo'), [busy, setBusy] = useState(false), [oq, setOq] = useState(''), [dq, setDq] = useState(''), [promo, setPromo] = useState(''), [promoMsg, setPromoMsg] = useState(null);
   const mr = useRef(null);
   const r = D.ride;
   useEffect(() => {
@@ -260,13 +261,19 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
   const findD = async () => { if (!dq.trim()) return; const g = await geo(dq); if (!g) return Alert.alert('CERQUITA', 'No encontré esa dirección. Prueba con calle, número y barrio, o toca el mapa.'); setPr(null); setDest(g); setDq(g.name); };
   const myLoc = async () => { try { const p = (await Location.getCurrentPositionAsync({})).coords; const nm = await nameOf(p.latitude, p.longitude); setO({ lat: p.latitude, lng: p.longitude, name: nm }); setOq(nm); } catch (e) { Alert.alert('CERQUITA', 'Activa el GPS y el permiso de ubicación.'); } };
 
+  const applyPromo = async () => {
+    if (!promo.trim()) return setPromoMsg(null);
+    const { data, error } = await supabase.rpc('check_promo', { p_code: promo, p_fare: price });
+    if (error) return Alert.alert('CERQUITA', error.message);
+    setPromoMsg(data.ok ? { ok: true, t: `✔ Descuento estimado: ${$c(data.discount)} (lo asume CERQUITA)` } : { ok: false, t: data.message });
+  };
   const pick = async e => { if (r) return; const { latitude: lat, longitude: lng } = e.nativeEvent.coordinate; setPr(null); const nm = await nameOf(lat, lng); setDest({ lat, lng, name: nm }); setDq(nm); };
   const request = async () => {
     if (!k) return Alert.alert('CERQUITA', 'Toca el mapa para elegir tu destino.');
     if (price < k.lo || price > k.hi) return Alert.alert('CERQUITA', `Tu oferta debe estar entre ${$c(k.lo)} y ${$c(k.hi)}.`);
     setBusy(true);
-    const ok = await m(supabase.from('rides').insert({ passenger_id: uid, category: c, origin_name: o.name, origin_lat: o.lat, origin_lng: o.lng, dest_name: d.name, dest_lat: d.lat, dest_lng: d.lng, offered_fare: price, payment_method: pay }));
-    setBusy(false); if (ok) { setPr(null); setDest(null); refresh(); }
+    const ok = await m(supabase.from('rides').insert({ passenger_id: uid, category: c, origin_name: o.name, origin_lat: o.lat, origin_lng: o.lng, dest_name: d.name, dest_lat: d.lat, dest_lng: d.lng, offered_fare: price, payment_method: pay, promo_code: promo.trim() || null }));
+    setBusy(false); if (ok) { setPr(null); setDest(null); setPromo(''); setPromoMsg(null); refresh(); }
   };
   const accept = async id => { const { error } = await supabase.rpc('accept_offer', { p_offer: id }); if (error) Alert.alert('CERQUITA', 'La oferta ya no está disponible.'); refresh(); };
   const cancel = async id => { const { error } = await supabase.rpc('cancel_ride', { p_ride: id }); if (error) Alert.alert('CERQUITA', error.message); refresh(); };
@@ -313,6 +320,11 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
             <View style={{ flexDirection: 'row', marginBottom: 10 }}>
               {[['efectivo', 'Efectivo'], ['transferencia', 'Transferencia'], ['billetera', 'Billetera']].map(([v, l]) => <Chip key={v} t={l} on={pay === v} color={C.p} onPress={() => setPay(v)} />)}
             </View>
+            <View style={[s.row, { marginBottom: 6 }]}>
+              <Input style={{ flex: 1, marginBottom: 0 }} placeholder="Código de descuento (opcional)" value={promo} onChangeText={t => { setPromo(t); setPromoMsg(null); }} autoCapitalize="characters" />
+              <Btn t="Aplicar" ghost small onPress={applyPromo} />
+            </View>
+            {promoMsg && <Text style={{ color: promoMsg.ok ? C.d : C.red, marginBottom: 8 }}>{promoMsg.t}</Text>}
             <Btn t={busy ? 'Enviando…' : 'Proponer mi precio'} onPress={request} />
           </Card>
         )}
@@ -335,7 +347,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
         {r && r.status === 'completed' && (
           <Card>
             <Text style={s.h}>Llegaste a tu destino</Text>
-            <Text>Total: {$c(r.agreed_fare)} · {r.payment_method}</Text>
+            <Text>Total a pagar: {$c(r.agreed_fare - (D.pay?.discount_amount || 0))} · {r.payment_method}{D.pay?.discount_amount > 0 ? ` (descuento ${$c(D.pay.discount_amount)})` : ''}</Text>
             <Mut>Califica a {D.pd?.display_name}</Mut>
             <View style={{ flexDirection: 'row', marginTop: 8 }}>{[1, 2, 3, 4, 5].map(n => <Chip key={n} t={`${n} ★`} color={C.p} onPress={() => rate(n)} />)}</View>
           </Card>
@@ -345,6 +357,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
             <Text style={s.h}>{ST[r.status]}</Text>
             <Text style={{ fontWeight: '700' }}>{D.pd?.display_name} ★ {D.pd?.rating_avg} · {veh?.model} · {veh?.plate}</Text>
             <Mut>Tarifa acordada {$c(r.agreed_fare)} · {r.payment_method}</Mut>
+            {D.pay?.discount_amount > 0 && <Text style={{ color: C.d, fontWeight: '700' }}>Descuento −{$c(D.pay.discount_amount)} · Pagas {$c(D.pay.amount - D.pay.discount_amount)}</Text>}
             <View style={[s.row, { marginTop: 10 }]}>
               <Btn t="🆘 Emergencia" color={C.red} small onPress={sos} />
               <Btn t="📤 Compartir viaje" ghost small onPress={shareTrip} />
@@ -449,6 +462,7 @@ function Driver({ uid, cfg, cats, D, refresh }) {
             <Text style={s.h}>{ST[cur.status]}</Text>
             <Text>{cur.passenger_name} · {cur.origin_name} → {cur.dest_name} · {cur.distance_km} km</Text>
             <Mut>Tarifa acordada {$c(cur.agreed_fare)} (neto {$c(cur.agreed_fare - ([].concat(cur.payments || [])[0]?.commission_amount ?? 0))}) · {cur.payment_method}</Mut>
+            {([].concat(cur.payments || [])[0]?.discount_amount || 0) > 0 && <Text style={{ color: C.d, marginTop: 6 }}>El pasajero usó un descuento y paga {$c(cur.agreed_fare - [].concat(cur.payments)[0].discount_amount)}. Tus ganancias no cambian: CERQUITA asume el descuento.</Text>}
             <Btn t={{ accepted: 'Confirmar llegada', arrived: 'Iniciar viaje', ongoing: 'Finalizar viaje' }[cur.status]} color={C.d} onPress={() => next(cur.id)} style={{ marginTop: 10 }} />
           </Card>
         ) : !drv.online ? <Mut>Conéctate para recibir solicitudes cercanas.</Mut> : (
