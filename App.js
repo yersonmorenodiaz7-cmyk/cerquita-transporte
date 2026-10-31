@@ -98,14 +98,15 @@ function Main({ user }) {
         loc = (await q(supabase.from('driver_locations').select('lat,lng').eq('driver_id', ride.driver_id).maybeSingle())) || null;
       }
     }
-    let req = [], mo = [], cur = null, dh = [];
+    let req = [], mo = [], cur = null, dh = [], plan = null;
     if (drv) {
       if (drv.online && drv.status === 'approved') req = ((await q(supabase.from('rides').select('*').eq('status', 'searching').eq('category', drv.category).order('created_at', { ascending: false }))) || []).filter(r => r.passenger_id !== uid);
       mo = (await q(supabase.from('offers').select('ride_id,price').eq('driver_id', drv.id))) || [];
-      cur = ((await q(supabase.from('rides').select('*').eq('driver_id', drv.id).in('status', ['accepted', 'arrived', 'ongoing']).limit(1))) || [])[0] || null;
-      dh = (await q(supabase.from('rides').select('agreed_fare').eq('driver_id', drv.id).eq('status', 'completed').limit(100))) || [];
+      cur = ((await q(supabase.from('rides').select('*,payments(commission_amount)').eq('driver_id', drv.id).in('status', ['accepted', 'arrived', 'ongoing']).limit(1))) || [])[0] || null;
+      dh = (await q(supabase.from('payments').select('amount,commission_amount,rides!inner(driver_id,status)').eq('rides.driver_id', drv.id).eq('rides.status', 'completed').limit(100))) || [];
+      plan = ((await q(supabase.from('driver_subscriptions').select('ends_at,plans(name,commission_pct)').eq('driver_id', drv.id).gt('ends_at', new Date().toISOString()).order('ends_at', { ascending: false }).limit(1))) || [])[0] || null;
     }
-    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh });
+    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan });
   }, [uid]);
 
   useEffect(() => {
@@ -139,6 +140,28 @@ function Main({ user }) {
       {role === 'd' && <Driver {...props} />}
       {role === 'a' && <ScrollView contentContainerStyle={{ padding: 12 }}><Card><Text style={s.h}>Administración</Text><Mut>El panel de administración (conductores, tarifas, viajes y alertas) está en la versión web.</Mut><Btn t="Abrir panel web" color="#6d4aff" onPress={() => Linking.openURL(WEB)} style={{ marginTop: 10 }} /></Card></ScrollView>}
     </View>
+  );
+}
+
+// ===== Reportar un problema (reclamaciones) =====
+function Report({ uid, rideId }) {
+  const [open, setOpen] = useState(false), [kind, setKind] = useState('Cobro'), [txt, setTxt] = useState('');
+  const send = async () => {
+    if (txt.trim().length < 10) return Alert.alert('CERQUITA', 'Cuéntanos qué pasó (mínimo 10 letras).');
+    if (await m(supabase.from('claims').insert({ user_id: uid, ride_id: rideId || null, kind, description: txt.trim() }))) {
+      Alert.alert('CERQUITA', 'Recibimos tu reclamación. Te responderemos pronto.'); setTxt(''); setOpen(false);
+    }
+  };
+  if (!open) return <T onPress={() => setOpen(true)}><Text style={{ color: C.mut, textAlign: 'center', marginVertical: 10 }}>¿Tuviste un problema? Reportar</Text></T>;
+  return (
+    <Card>
+      <Text style={s.h}>Reportar un problema</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
+        {['Cobro', 'Conductor', 'Seguridad', 'Otro'].map(k => <Chip key={k} t={k} on={kind === k} color={C.p} onPress={() => setKind(k)} />)}
+      </ScrollView>
+      <Input placeholder="Cuéntanos qué pasó" value={txt} onChangeText={setTxt} multiline style={{ minHeight: 80, textAlignVertical: 'top' }} maxLength={500} />
+      <View style={s.row}><Btn t="Enviar" small onPress={send} /><Btn t="Cancelar" ghost small onPress={() => setOpen(false)} /></View>
+    </Card>
   );
 }
 
@@ -305,6 +328,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
           </Card>
         )}
         {r && ['accepted', 'arrived', 'ongoing'].includes(r.status) && <Chat rideId={r.id} uid={uid} who={D.pd?.display_name || 'tu conductor'} />}
+        <Report uid={uid} rideId={r?.id} />
       </ScrollView>
     </View>
   );
@@ -373,7 +397,7 @@ function Driver({ uid, cfg, cats, D, refresh }) {
   );
   if (drv.status !== 'approved') return <ScrollView contentContainerStyle={{ padding: 12 }}><Card><Text style={s.h}>{drv.display_name}</Text><Text>Estado de tu cuenta: {{ pending: 'pendiente de aprobación', rejected: 'rechazada', suspended: 'suspendida' }[drv.status]}. Un administrador debe revisar tus documentos.</Text></Card></ScrollView>;
 
-  const gross = D.dh.reduce((a, x) => a + x.agreed_fare, 0), net = gross * (1 - cfg.commission_pct / 100), v = drv.vehicles?.[0], cur = D.cur;
+  const gross = D.dh.reduce((a, x) => a + x.amount, 0), net = gross - D.dh.reduce((a, x) => a + x.commission_amount, 0), v = drv.vehicles?.[0], cur = D.cur;
   const list = D.req.filter(x => !hid.includes(x.id));
   return (
     <View style={{ flex: 1 }}>
@@ -392,13 +416,14 @@ function Driver({ uid, cfg, cats, D, refresh }) {
         </View>
         <Card>
           <Text style={{ fontWeight: '700' }}>{v?.model} · {v?.plate} · {cats[drv.category]?.name}</Text>
+          <Mut>{D.plan ? `Plan ${D.plan.plans?.name} · comisión ${D.plan.plans?.commission_pct}% · vence ${new Date(D.plan.ends_at).toLocaleDateString('es-CO')}` : `Comisión general ${cfg.commission_pct}%`}</Mut>
           <Btn t={drv.online ? 'Desconectarme' : 'Conectarme'} color={drv.online ? C.red : C.d} onPress={online} style={{ marginTop: 8 }} />
         </Card>
         {cur ? (
           <Card>
             <Text style={s.h}>{ST[cur.status]}</Text>
             <Text>{cur.passenger_name} · {cur.origin_name} → {cur.dest_name} · {cur.distance_km} km</Text>
-            <Mut>Tarifa acordada {$c(cur.agreed_fare)} (neto {$c(cur.agreed_fare * (1 - cfg.commission_pct / 100))}) · {cur.payment_method}</Mut>
+            <Mut>Tarifa acordada {$c(cur.agreed_fare)} (neto {$c(cur.agreed_fare - ([].concat(cur.payments || [])[0]?.commission_amount ?? 0))}) · {cur.payment_method}</Mut>
             <Btn t={{ accepted: 'Confirmar llegada', arrived: 'Iniciar viaje', ongoing: 'Finalizar viaje' }[cur.status]} color={C.d} onPress={() => next(cur.id)} style={{ marginTop: 10 }} />
           </Card>
         ) : !drv.online ? <Mut>Conéctate para recibir solicitudes cercanas.</Mut> : (
