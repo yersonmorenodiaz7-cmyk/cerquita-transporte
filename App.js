@@ -1,12 +1,13 @@
 import 'react-native-url-polyfill/auto';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Platform, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity as T, Vibration, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Image, Linking, Platform, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity as T, Vibration, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
+import * as TaskManager from 'expo-task-manager';
 
 // ===== Configuración (la llave anon es pública; la seguridad la dan las políticas RLS de Supabase) =====
 const SB_URL = 'https://bwcluuunbaxpmdpscekg.supabase.co';
@@ -15,7 +16,18 @@ const WEB = 'https://yersonmorenodiaz7-cmyk.github.io/cerquita-transporte/';
 const supabase = createClient(SB_URL, SB_KEY, { auth: { storage: AsyncStorage, autoRefreshToken: true, persistSession: true, detectSessionInUrl: false } });
 
 // Las notificaciones locales suenan y vibran aunque la app esté en segundo plano
-Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowAlert: true, shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }) });
+Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowAlert: false, shouldShowBanner: false, shouldShowList: false, shouldPlaySound: false, shouldSetBadge: false }) });
+
+// Tarea en segundo plano: mantiene la ubicación del conductor al día aunque la app esté minimizada
+const BG_TASK = 'cerquita-bg-location';
+TaskManager.defineTask(BG_TASK, async ({ data, error }) => {
+  if (error || !data?.locations?.length) return;
+  const c = data.locations[data.locations.length - 1].coords;
+  const id = await AsyncStorage.getItem('cq_driver_id');
+  if (!id) return;
+  await supabase.from('driver_locations').upsert({ driver_id: id, lat: c.latitude, lng: c.longitude, heading: c.heading, updated_at: new Date().toISOString() });
+});
+const b64ToBuffer = b64 => { const bin = globalThis.atob(b64), bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return bytes.buffer; };
 
 const C = { p: '#1769ff', d: '#12a150', bg: '#f4f6f8', card: '#fff', br: '#dfe4e9', mut: '#66727e', fg: '#10181f', red: '#d92d3a' };
 const ST = { searching: 'Buscando ofertas', accepted: 'Conductor en camino', arrived: 'Tu conductor llegó', ongoing: 'En viaje', completed: 'Viaje finalizado', cancelled: 'Cancelado', expired: 'Expirado' };
@@ -46,7 +58,8 @@ export default function App() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true); });
     const { data: l } = supabase.auth.onAuthStateChange((_e, sess) => setSession(sess));
-    return () => l.subscription.unsubscribe();
+    const app = AppState.addEventListener('change', st => { if (st === 'active') supabase.auth.startAutoRefresh(); else supabase.auth.stopAutoRefresh(); });
+    return () => { l.subscription.unsubscribe(); app.remove(); };
   }, []);
   return (
     <View style={s.root}>
@@ -137,6 +150,18 @@ function Main({ user }) {
     ch.subscribe();
     return () => { clearTimeout(timer.current); supabase.removeChannel(ch); };
   }, [uid, refresh]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('solicitudes', { name: 'Solicitudes y avisos', importance: Notifications.AndroidImportance.MAX, vibrationPattern: [0, 500, 300, 500], sound: 'default' });
+        const perm = await Notifications.requestPermissionsAsync();
+        if (!perm.granted) return;
+        const tok = await Notifications.getExpoPushTokenAsync();
+        await supabase.rpc('register_push_token', { p_token: tok.data, p_platform: Platform.OS });
+      } catch (e) { console.log('push:', e?.message); }
+    })();
+  }, [uid]);
 
   if (!B || !B.cfg) return <ActivityIndicator style={{ flex: 1 }} size="large" color={C.p} />;
   const staff = ['operador', 'supervisor', 'admin'].includes(B.p?.role);
@@ -234,7 +259,7 @@ function Chat({ rideId, uid, who }) {
 
 // ===== Pasajero =====
 function Passenger({ uid, cfg, cats, D, refresh }) {
-  const [o, setO] = useState(null), [d, setDest] = useState(null), [c, setC] = useState('carro'), [pr, setPr] = useState(null), [pay, setPay] = useState('efectivo'), [busy, setBusy] = useState(false), [oq, setOq] = useState(''), [dq, setDq] = useState(''), [promo, setPromo] = useState(''), [promoMsg, setPromoMsg] = useState(null);
+  const [o, setO] = useState(null), [d, setDest] = useState(null), [c, setC] = useState('carro'), [pr, setPr] = useState(null), [pay, setPay] = useState('efectivo'), [busy, setBusy] = useState(false), [oq, setOq] = useState(''), [dq, setDq] = useState(''), [promo, setPromo] = useState(''), [promoMsg, setPromoMsg] = useState(null), [note, setNote] = useState(''), [photo, setPhoto] = useState(null);
   const mr = useRef(null);
   const r = D.ride;
   useEffect(() => {
@@ -286,6 +311,14 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
   const findD = async () => { if (!dq.trim()) return; const g = await geo(dq); if (!g) return Alert.alert('CERQUITA', 'No encontré esa dirección. Prueba con calle, número y barrio, o toca el mapa.'); setPr(null); setDest(g); setDq(g.name); };
   const myLoc = async () => { try { const p = (await Location.getCurrentPositionAsync({})).coords; const nm = await nameOf(p.latitude, p.longitude); setO({ lat: p.latitude, lng: p.longitude, name: nm }); setOq(nm); } catch (e) { Alert.alert('CERQUITA', 'Activa el GPS y el permiso de ubicación.'); } };
 
+  const pickPhoto = async camera => {
+    try {
+      const perm = camera ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) return Alert.alert('CERQUITA', 'Necesito permiso para usar la cámara o tus fotos.');
+      const res = camera ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.5 }) : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.5, mediaTypes: ['images'] });
+      if (!res.canceled && res.assets?.[0]?.base64) setPhoto({ uri: res.assets[0].uri, b64: res.assets[0].base64 });
+    } catch (e) { Alert.alert('CERQUITA', 'No se pudo abrir la cámara o la galería.'); }
+  };
   const applyPromo = async () => {
     if (!promo.trim()) return setPromoMsg(null);
     const { data, error } = await supabase.rpc('check_promo', { p_code: promo, p_fare: price });
@@ -297,8 +330,14 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
     if (!k) return Alert.alert('CERQUITA', 'Toca el mapa para elegir tu destino.');
     if (price < k.lo || price > k.hi) return Alert.alert('CERQUITA', `Tu oferta debe estar entre ${$c(k.lo)} y ${$c(k.hi)}.`);
     setBusy(true);
-    const ok = await m(supabase.from('rides').insert({ passenger_id: uid, category: c, origin_name: o.name, origin_lat: o.lat, origin_lng: o.lng, dest_name: d.name, dest_lat: d.lat, dest_lng: d.lng, offered_fare: price, payment_method: pay, promo_code: promo.trim() || null }));
-    setBusy(false); if (ok) { setPr(null); setDest(null); setPromo(''); setPromoMsg(null); refresh(); }
+    let photoPath = null;
+    if (photo) {
+      photoPath = `${uid}/${Date.now()}.jpg`;
+      const up = await supabase.storage.from('ride-photos').upload(photoPath, b64ToBuffer(photo.b64), { contentType: 'image/jpeg' });
+      if (up.error) { setBusy(false); return Alert.alert('CERQUITA', 'No se pudo subir la foto: ' + up.error.message); }
+    }
+    const ok = await m(supabase.from('rides').insert({ passenger_id: uid, category: c, origin_name: o.name, origin_lat: o.lat, origin_lng: o.lng, dest_name: d.name, dest_lat: d.lat, dest_lng: d.lng, offered_fare: price, payment_method: pay, promo_code: promo.trim() || null, pickup_note: note.trim() || null, pickup_photo_path: photoPath }));
+    setBusy(false); if (ok) { setPr(null); setDest(null); setPromo(''); setPromoMsg(null); setNote(''); setPhoto(null); refresh(); }
   };
   const accept = async id => { const { error } = await supabase.rpc('accept_offer', { p_offer: id }); if (error) Alert.alert('CERQUITA', 'La oferta ya no está disponible.'); refresh(); };
   const cancel = async id => { const { error } = await supabase.rpc('cancel_ride', { p_ride: id }); if (error) Alert.alert('CERQUITA', error.message); refresh(); };
@@ -347,6 +386,16 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
             <View style={{ flexDirection: 'row', marginBottom: 10 }}>
               {[['efectivo', 'Efectivo'], ['transferencia', 'Transferencia'], ['billetera', 'Billetera']].map(([v, l]) => <Chip key={v} t={l} on={pay === v} color={C.p} onPress={() => setPay(v)} />)}
             </View>
+            <Mut>¿Tu dirección no tiene nomenclatura? Ayuda al conductor a encontrarte:</Mut>
+            <Input placeholder="Punto de referencia (ej: casa azul frente a la tienda)" value={note} onChangeText={setNote} maxLength={200} style={{ marginTop: 6 }} />
+            {photo ? (
+              <View style={{ marginBottom: 10 }}>
+                <Image source={{ uri: photo.uri }} style={{ height: 160, borderRadius: 10 }} />
+                <Btn t="Quitar foto" ghost small onPress={() => setPhoto(null)} style={{ marginTop: 6 }} />
+              </View>
+            ) : (
+              <View style={[s.row, { marginBottom: 10 }]}><Btn t="📷 Foto de la entrada" ghost small onPress={() => pickPhoto(true)} /><Btn t="🖼️ Galería" ghost small onPress={() => pickPhoto(false)} /></View>
+            )}
             <View style={[s.row, { marginBottom: 6 }]}>
               <Input style={{ flex: 1, marginBottom: 0 }} placeholder="Código de descuento (opcional)" value={promo} onChangeText={t => { setPromo(t); setPromoMsg(null); }} autoCapitalize="characters" />
               <Btn t="Aplicar" ghost small onPress={applyPromo} />
@@ -440,6 +489,23 @@ function Docs({ drv, docs = [], refresh }) {
 }
 
 // ===== Conductor =====
+function PickupInfo({ r }) {
+  const [url, setUrl] = useState(null);
+  if (!r.pickup_note && !r.pickup_photo_path) return null;
+  const show = async () => {
+    const { data, error } = await supabase.storage.from('ride-photos').createSignedUrl(r.pickup_photo_path, 300);
+    if (error) return Alert.alert('CERQUITA', 'No se pudo cargar la foto.');
+    setUrl(data.signedUrl);
+  };
+  return (
+    <View style={{ marginTop: 6 }}>
+      {r.pickup_note ? <Text style={{ color: C.fg }}>📌 Referencia: {r.pickup_note}</Text> : null}
+      {r.pickup_photo_path && !url ? <Btn t="📷 Ver foto de la entrada" ghost small onPress={show} style={{ marginTop: 6 }} /> : null}
+      {url ? <Image source={{ uri: url }} style={{ height: 200, borderRadius: 10, marginTop: 6 }} resizeMode="cover" /> : null}
+    </View>
+  );
+}
+
 function Req({ r, mine, pos, onOffer, onHide }) {
   const [v, setV] = useState('');
   return (
@@ -447,6 +513,7 @@ function Req({ r, mine, pos, onOffer, onHide }) {
       <View style={s.row}><Text style={{ fontWeight: '700', flex: 1 }}>{r.origin_name} → {r.dest_name}</Text><Text style={{ fontWeight: '800' }}>{$c(r.offered_fare)}</Text></View>
       <Mut>{r.distance_km} km · ~{r.est_minutes} min · Referencia {$c(r.reference_fare)}</Mut>
       {pos && <Mut>📍 El pasajero está a {(hav(pos, { lat: r.origin_lat, lng: r.origin_lng }) * 1.3).toFixed(1)} km de ti · llegas en ~{Math.max(1, Math.ceil(hav(pos, { lat: r.origin_lat, lng: r.origin_lng }) * 1.3 / 24 * 60))} min</Mut>}
+      <PickupInfo r={r} />
       {mine ? <Mut>Oferta enviada por {$c(mine.price)}. Esperando al pasajero…</Mut> : (
         <View style={{ marginTop: 8 }}>
           <Btn t={`Aceptar ${$c(r.offered_fare)}`} color={C.d} small onPress={() => onOffer(r.id, r.offered_fare)} />
@@ -473,12 +540,34 @@ function Driver({ uid, cfg, cats, D, refresh }) {
       const save = c => { setPos({ lat: c.latitude, lng: c.longitude }); return m(supabase.from('driver_locations').upsert({ driver_id: drv.id, lat: c.latitude, lng: c.longitude, heading: c.heading, updated_at: new Date().toISOString() })); };
       try { await save((await Location.getCurrentPositionAsync({})).coords); } catch (e) { Alert.alert('CERQUITA', 'Activa el GPS para recibir solicitudes cercanas.'); }
       if (!alive) return;
-      sub = await Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, distanceInterval: 25, timeInterval: 8000 }, l => save(l.coords));
+      sub = await Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, distanceInterval: 0, timeInterval: 10000 }, l => save(l.coords));
     })();
     return () => { alive = false; sub?.remove(); };
   }, [drv?.online, drv?.id]);
 
-  // Aviso con sonido y vibración cuando llega una solicitud nueva cercana
+  // Segundo plano: la ubicación sigue enviándose con la app minimizada (con aviso fijo en la barra)
+  useEffect(() => {
+    if (!drv) return;
+    (async () => {
+      try {
+        if (drv.online) {
+          await AsyncStorage.setItem('cq_driver_id', drv.id);
+          const fg = await Location.requestForegroundPermissionsAsync();
+          if (fg.status !== 'granted') return;
+          const bg = await Location.requestBackgroundPermissionsAsync();
+          if (bg.status !== 'granted') return Alert.alert('CERQUITA', 'Para recibir solicitudes con la app minimizada, entra a Ajustes → Aplicaciones → CERQUITA → Ubicación y elige "Permitir todo el tiempo".');
+          if (!(await Location.hasStartedLocationUpdatesAsync(BG_TASK))) {
+            await Location.startLocationUpdatesAsync(BG_TASK, { accuracy: Location.Accuracy.Balanced, timeInterval: 15000, distanceInterval: 0, pausesUpdatesAutomatically: false, foregroundService: { notificationTitle: 'CERQUITA en línea', notificationBody: 'Recibiendo solicitudes de viaje cercanas', notificationColor: '#1769ff' } });
+          }
+        } else {
+          await AsyncStorage.removeItem('cq_driver_id');
+          if (await Location.hasStartedLocationUpdatesAsync(BG_TASK)) await Location.stopLocationUpdatesAsync(BG_TASK);
+        }
+      } catch (e) { console.log('bg:', e?.message); }
+    })();
+  }, [drv?.online, drv?.id]);
+
+  // Aviso con vibración cuando llega una solicitud nueva cercana (el sonido en segundo plano lo da la notificación push)
   const seen = useRef(null);
   const idsKey = (D.req || []).filter(x => !hid.includes(x.id)).map(x => x.id).join(',');
   useEffect(() => {
@@ -498,10 +587,6 @@ function Driver({ uid, cfg, cats, D, refresh }) {
     cur.forEach(x => seen.current.add(x.id));
     if (!fresh.length) return;
     Vibration.vibrate([0, 600, 300, 600, 300, 600]);
-    Notifications.scheduleNotificationAsync({
-      content: { title: '🚕 Nueva solicitud cercana', body: `${fresh[0].origin_name} → ${fresh[0].dest_name} · ${$c(fresh[0].offered_fare)}`, sound: true },
-      trigger: Platform.OS === 'android' ? { channelId: 'solicitudes' } : null,
-    }).catch(() => {});
   }, [idsKey, drv?.online]);
 
   const register = async () => {
@@ -557,6 +642,7 @@ function Driver({ uid, cfg, cats, D, refresh }) {
           <Card>
             <Text style={s.h}>{ST[cur.status]}</Text>
             <Text>{cur.passenger_name} · {cur.origin_name} → {cur.dest_name} · {cur.distance_km} km</Text>
+            <PickupInfo r={cur} />
             <Mut>Tarifa acordada {$c(cur.agreed_fare)} (neto {$c(cur.agreed_fare - ([].concat(cur.payments || [])[0]?.commission_amount ?? 0))}) · {cur.payment_method}</Mut>
             {([].concat(cur.payments || [])[0]?.discount_amount || 0) > 0 && <Text style={{ color: C.d, marginTop: 6 }}>El pasajero usó un descuento y paga {$c(cur.agreed_fare - [].concat(cur.payments)[0].discount_amount)}. Tus ganancias no cambian: CERQUITA asume el descuento.</Text>}
             <Btn t={{ accepted: 'Confirmar llegada', arrived: 'Iniciar viaje', ongoing: 'Finalizar viaje' }[cur.status]} color={C.d} onPress={() => next(cur.id)} style={{ marginTop: 10 }} />
