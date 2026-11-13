@@ -4,3 +4,6 @@ dist/
 *.apk
 *.aab
 .env
+.env.*
+!.env.example
+google-services.json
