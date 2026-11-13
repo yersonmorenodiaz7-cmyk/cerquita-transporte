@@ -17,11 +17,10 @@
     ],
     "android": {
       "package": "co.cerquita.app",
-      "permissions": [
+      
+            "permissions": [
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.RECORD_AUDIO"
       ],
       "config": {
@@ -33,12 +32,14 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#1769ff"
       }
+       
     },
     "ios": {
       "bundleIdentifier": "co.cerquita.app",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "CERQUITA usa tu ubicación para conectar pasajeros y conductores cercanos."
       }
+
     },
     "icon": "./assets/icon.png",
     "splash": {
