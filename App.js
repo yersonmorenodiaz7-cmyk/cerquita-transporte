@@ -137,9 +137,9 @@ function Main({ user }) {
     let offers = [], pd = null, loc = null, pay = null, seen = 0;
     if (ride && ride.status === 'searching') seen = (await supabase.from('ride_views').select('id', { count: 'exact', head: true }).eq('ride_id', ride.id)).count || 0;
     if (ride) {
-      if (ride.status === 'searching') offers = (await q(supabase.from('offers').select('*,drivers(display_name,rating_avg,vehicles(model,plate))').eq('ride_id', ride.id).eq('status', 'pending').order('price'))) || [];
+      if (ride.status === 'searching') offers = (await q(supabase.from('offers').select('*,drivers(display_name,rating_avg,pay_info,vehicles(model,plate))').eq('ride_id', ride.id).eq('status', 'pending').order('price'))) || [];
       else if (ride.driver_id) {
-        pd = (await q(supabase.from('drivers').select('user_id,display_name,rating_avg,vehicles(model,plate)').eq('id', ride.driver_id).maybeSingle())) || null;
+        pd = (await q(supabase.from('drivers').select('user_id,display_name,rating_avg,pay_info,vehicles(model,plate)').eq('id', ride.driver_id).maybeSingle())) || null;
         loc = (await q(supabase.from('driver_locations').select('lat,lng').eq('driver_id', ride.driver_id).maybeSingle())) || null;
         pay = (await q(supabase.from('payments').select('amount,discount_amount,status,method').eq('ride_id', ride.id).maybeSingle())) || null;
       }
@@ -346,7 +346,7 @@ const mins = sec => Math.max(1, Math.round(sec / 60));
 const fmtLeft = (iso, now) => { const t = Math.max(0, Math.floor((new Date(iso).getTime() - now) / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 
 // Pantalla completa del viaje para el conductor: mapa, rutas, tráfico y acciones
-function DriverTrip({ cur, pos, next, uid }) {
+function DriverTrip({ cur, pos, next, uid, payInfo }) {
   const mr = useRef(null);
   const target = cur.status === 'accepted' ? { lat: cur.origin_lat, lng: cur.origin_lng } : cur.status === 'ongoing' ? { lat: cur.dest_lat, lng: cur.dest_lng } : null;
   const rt = useRoutes(pos, target, !!target);
@@ -376,6 +376,7 @@ function DriverTrip({ cur, pos, next, uid }) {
           )}
           <PickupInfo r={cur} />
           <Text style={{ color: C.d, fontWeight: '700', marginTop: 8 }}>💵 Cobra al pasajero {$c(cur.agreed_fare - (pay?.discount_amount || 0))} ({cur.payment_method})</Text>
+          {cur.payment_method === 'transferencia' && <Mut>{payInfo ? `El pasajero verá tu cuenta: ${payInfo}` : 'No tienes cuenta para transferencias guardada: dile por el chat a dónde transferir.'}</Mut>}
           {(pay?.discount_amount || 0) > 0 && <Mut>Usó un descuento: CERQUITA te lo devuelve en tu saldo.</Mut>}
           <Mut>Tarifa acordada {$c(cur.agreed_fare)} (neto {$c(cur.agreed_fare - (pay?.commission_amount || 0))})</Mut>
           {target && <Btn t="🧭 Navegar con Google Maps" ghost small onPress={openNav} style={{ marginTop: 8 }} />}
@@ -465,7 +466,12 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
   const findD = async () => { if (!dq.trim()) return; const g = await geo(dq); if (!g) return Alert.alert('CERQUITA', 'No encontré esa dirección. Prueba con calle, número y barrio, o toca el mapa.'); setPr(null); setDest(g); setDq(g.name); };
   const myLoc = async () => { try { const p = (await Location.getCurrentPositionAsync({})).coords; const nm = await nameOf(p.latitude, p.longitude); setO({ lat: p.latitude, lng: p.longitude, name: nm }); setOq(nm); } catch (e) { Alert.alert('CERQUITA', 'Activa el GPS y el permiso de ubicación.'); } };
 
-  const PayBox = () => (D.pay ? <Mut>Pagas directamente al conductor: {$c(D.pay.amount - D.pay.discount_amount)} · {D.pay.method}</Mut> : null);
+  const PayBox = () => (D.pay ? (
+    <View>
+      <Mut>Pagas directamente al conductor: {$c(D.pay.amount - D.pay.discount_amount)} · {D.pay.method}</Mut>
+      {D.pay.method === 'transferencia' && <Text style={{ fontWeight: '700', color: C.p, marginTop: 4 }}>{D.pd?.pay_info ? `Transfiere a: ${D.pd.pay_info}` : 'Pídele al conductor por el chat a qué cuenta transferir.'}</Text>}
+    </View>
+  ) : null);
   const pickPhoto = async camera => {
     try {
       const perm = camera ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -592,8 +598,9 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
               <Text style={{ color: C.mut, fontSize: 12, marginTop: 6, marginBottom: 6 }}>Los peajes y las tasas de aeropuerto no están incluidos: se pagan aparte. Una vez aceptes al conductor y la tarifa, no se pueden cambiar durante el viaje.</Text>
             </>}
             <View style={{ flexDirection: 'row', marginBottom: 10 }}>
-              {[['efectivo', 'Efectivo'], ['transferencia', 'Transferencia (Nequi, etc.)']].map(([v, l]) => <Chip key={v} t={l} on={pay === v} color={C.p} onPress={() => setPay(v)} />)}
+              {[['efectivo', 'Efectivo'], ['transferencia', 'Transferencia (Nequi, Daviplata…)']].map(([v, l]) => <Chip key={v} t={l} on={pay === v} color={C.p} onPress={() => setPay(v)} />)}
             </View>
+            {pay === 'transferencia' && <Mut>Pagas directo al conductor. Cuando aceptes su oferta verás a qué cuenta transferir.</Mut>}
             <Mut>¿Tu dirección no tiene nomenclatura? Ayuda al conductor a encontrarte:</Mut>
             <Input placeholder="Punto de referencia (ej: casa azul frente a la tienda)" value={note} onChangeText={setNote} maxLength={200} style={{ marginTop: 6 }} />
             {photo ? (
@@ -632,6 +639,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
                     <View style={{ flex: 1 }}>
                       <Text style={{ fontWeight: '700', fontSize: 16 }}>{f.drivers?.display_name} ★ {f.drivers?.rating_avg}</Text>
                       <Mut>{f.drivers?.vehicles?.[0]?.model} · {f.drivers?.vehicles?.[0]?.plate} · llega en {f.eta_minutes} min</Mut>
+                      <Text style={{ fontSize: 12, color: r.payment_method === 'transferencia' && !f.drivers?.pay_info ? C.red : C.mut }}>{f.drivers?.pay_info ? '💳 Recibe transferencias' : r.payment_method === 'transferencia' ? '⚠️ No tiene cuenta para transferencias' : 'Cobra en efectivo'}</Text>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
                       <Text style={{ fontWeight: '800', fontSize: 20 }}>{$c(f.price)}</Text>
@@ -810,6 +818,19 @@ function Wallet({ drv, wallet = [], cfg, refresh }) {
   );
 }
 
+function PayInfo({ drv, refresh }) {
+  const [v, setV] = useState(drv.pay_info || '');
+  const save = async () => { if (await m(supabase.from('drivers').update({ pay_info: v.trim() || null }).eq('id', drv.id))) { Alert.alert('CERQUITA', 'Guardado.'); refresh(); } };
+  return (
+    <Card>
+      <Text style={s.h}>Cuenta para recibir transferencias</Text>
+      <Mut>Los pasajeros que paguen por transferencia verán esto al aceptar tu oferta. Ej: Nequi 300 123 4567 a nombre de Juan Pérez</Mut>
+      <Input placeholder="Nequi, Daviplata o Bancolombia…" value={v} onChangeText={setV} maxLength={120} style={{ marginTop: 8 }} />
+      <Btn t="Guardar" color={C.d} small onPress={save} />
+    </Card>
+  );
+}
+
 function PickupInfo({ r }) {
   const [url, setUrl] = useState(null);
   if (!r.pickup_note && !r.pickup_photo_path) return null;
@@ -959,7 +980,7 @@ function Driver({ uid, cfg, cats, D, refresh }) {
   if (drv.status !== 'approved') return <ScrollView contentContainerStyle={{ padding: 12 }} keyboardShouldPersistTaps="handled"><Card><Text style={s.h}>{drv.display_name}</Text><Text>{drv.status === 'pending' ? (drv.submitted ? 'Tu solicitud está en revisión. Te avisaremos cuando te aprueben.' : 'Para enviar tu solicitud sube tu foto y todos los documentos del vehículo. Son obligatorios.') : `Estado de tu cuenta: ${{ rejected: 'rechazada', suspended: 'suspendida' }[drv.status]}. Escríbenos si crees que es un error.`}</Text></Card>{drv.status === 'pending' && <Docs drv={drv} docs={D.docs} refresh={refresh} />}</ScrollView>;
 
   const gross = (D.dh || []).reduce((a, x) => a + x.amount, 0), net = gross - (D.dh || []).reduce((a, x) => a + x.commission_amount, 0), v = drv.vehicles?.[0], cur = D.cur;
-  if (cur) return <DriverTrip cur={cur} pos={pos} next={next} uid={uid} />;
+  if (cur) return <DriverTrip cur={cur} pos={pos} next={next} uid={uid} payInfo={drv.pay_info} />;
   const list = (D.req || []).filter(x => !hid.includes(x.id));
   return (
     <View style={{ flex: 1 }}>
@@ -977,6 +998,7 @@ function Driver({ uid, cfg, cats, D, refresh }) {
           <Card><Mut>Calificación</Mut><Text style={s.kpi}>★ {drv.rating_avg}</Text></Card>
         </View>
         <Wallet drv={drv} wallet={D.wallet} cfg={cfg} refresh={refresh} />
+        <PayInfo drv={drv} refresh={refresh} />
         <Card>
           <Text style={{ fontWeight: '700' }}>{v?.model} · {v?.plate} · {cats[drv.category]?.name}</Text>
           <Mut>{D.plan ? `Plan ${D.plan.plans?.name} · comisión ${D.plan.plans?.commission_pct}% · vence ${new Date(D.plan.ends_at).toLocaleDateString('es-CO')}` : `Comisión general ${cfg.commission_pct}%`}</Mut>
