@@ -47,6 +47,9 @@ const untilTxt = u => !u ? '' : isForever(u) ? 'hasta nuevo aviso' : 'hasta el '
 const leftTxt = u => { if (!u || isForever(u)) return ''; const t = Math.max(0, new Date(u).getTime() - Date.now()) / 60000, h = Math.floor(t / 60); return h >= 24 ? `Faltan ${Math.floor(h / 24)} d ${h % 24} h` : `Faltan ${h} h ${Math.round(t % 60)} min`; };
 // Contactos de confianza (se guardan solo en el celular)
 const CK = 'cq_contacts';
+// WhatsApp de soporte de CERQUITA
+const SUPPORT_WA = '573217955639';
+const supportWA = (msg = 'Hola, necesito ayuda con la app CERQUITA.') => Linking.openURL(`https://wa.me/${SUPPORT_WA}?text=${encodeURIComponent(msg)}`).catch(() => Alert.alert('CERQUITA', 'Escríbenos por WhatsApp al 321 795 5639.'));
 const loadContacts = async () => { try { return JSON.parse(await AsyncStorage.getItem(CK)) || []; } catch (e) { return []; } };
 const saveContacts = list => AsyncStorage.setItem(CK, JSON.stringify(list));
 const waPhone = p => { const d = String(p || '').replace(/\D/g, ''); return d.length === 10 ? '57' + d : d; };
@@ -396,7 +399,13 @@ function InfoSheet({ k, onClose, uid, rides }) {
         <Btn t="📞 Llamar a la Policía (123)" color={C.red} onPress={() => Linking.openURL('tel:123')} style={{ marginTop: 8 }} />
       </View>}
       {k === 'contacts' && <Contacts />}
-      {k === 'help' && <View><Mut>Cuéntanos tu problema y te responderemos pronto.</Mut><Report uid={uid} /></View>}
+      {k === 'help' && <View>
+        <Btn t="💬 Escribir a soporte por WhatsApp" color={C.d} onPress={() => supportWA()} />
+        <Mut>WhatsApp de soporte: 321 795 5639</Mut>
+        <View style={{ height: 12 }} />
+        <Mut>También puedes dejar una reclamación por escrito y te responderemos pronto.</Mut>
+        <Report uid={uid} />
+      </View>}
     </Sheet>
   );
 }
@@ -1006,7 +1015,8 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
         <Text style={{ textAlign: 'center', color: C.fg }}>No puedes pedir viajes {untilTxt(susp.passenger_until)}.</Text>
         {!!leftTxt(susp.passenger_until) && <Text style={{ textAlign: 'center', fontWeight: '800', fontSize: 18, marginTop: 8 }}>{leftTxt(susp.passenger_until)}</Text>}
         {!!susp.passenger_reason && <Text style={{ textAlign: 'center', color: C.mut, marginTop: 8 }}>Motivo: {susp.passenger_reason}</Text>}
-        <Text style={{ textAlign: 'center', color: C.mut, marginTop: 8 }}>Si crees que es un error, escríbenos en Menú ☰ › Ayuda y soporte.</Text>
+        <Text style={{ textAlign: 'center', color: C.mut, marginTop: 8 }}>Si crees que es un error, escríbenos a soporte.</Text>
+        <Btn t="💬 Escribir a soporte por WhatsApp" color={C.d} ghost onPress={() => supportWA('Hola, mi cuenta de pasajero en CERQUITA aparece suspendida y quiero revisar mi caso.')} style={{ marginTop: 12 }} />
       </Popup>
     </View>
   );
@@ -1283,7 +1293,7 @@ function Driver({ uid, cfg, cats, D, refresh }) {
     <Text style={{ color: C.fg, marginTop: 4 }}>No puedes conectarte ni enviar ofertas {untilTxt(ds.driver_until)}.</Text>
     {!!leftTxt(ds.driver_until) && <Text style={{ fontWeight: '700', marginTop: 4 }}>{leftTxt(ds.driver_until)}</Text>}
     {!!ds.driver_reason && <Text style={{ color: C.fg, marginTop: 4 }}>Motivo: {ds.driver_reason}</Text>}
-    <Mut>Si crees que es un error, escríbenos en Menú ☰ › Ayuda y soporte.</Mut>
+    <Btn t="💬 Escribir a soporte por WhatsApp" color={C.d} small onPress={() => supportWA('Hola, mi cuenta de conductor en CERQUITA aparece suspendida y quiero revisar mi caso.')} style={{ marginTop: 10 }} />
   </View>;
   const drv = D.drv;
   const [f, setF] = useState({ name: '', cat: 'carro', model: '', plate: '', color: '' }), [hid, setHid] = useState([]), [pos, setPos] = useState(null);
