@@ -45,6 +45,33 @@ const fareFor = (cfg, cc, km, code) => { km = Math.max(.3, km); const kk = Math.
 const isForever = u => String(u || '').includes('infinity');
 const untilTxt = u => !u ? '' : isForever(u) ? 'hasta nuevo aviso' : 'hasta el ' + new Date(u).toLocaleString('es-CO', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 const leftTxt = u => { if (!u || isForever(u)) return ''; const t = Math.max(0, new Date(u).getTime() - Date.now()) / 60000, h = Math.floor(t / 60); return h >= 24 ? `Faltan ${Math.floor(h / 24)} d ${h % 24} h` : `Faltan ${h} h ${Math.round(t % 60)} min`; };
+// Búsqueda de direcciones: primero el servidor (Google), si no responde usa el buscador del celular
+const searchPlaces = async (text, near, city) => {
+  const t = String(text || '').trim();
+  if (t.length < 3) return [];
+  try {
+    const { data } = await supabase.functions.invoke('geocode', { body: { q: city && !t.includes(',') ? `${t}, ${city}` : t, lat: near?.lat, lng: near?.lng } });
+    if (data?.results?.length) return data.results.filter(x => Number.isFinite(x.lat) && Number.isFinite(x.lng)).map(x => ({ lat: x.lat, lng: x.lng, name: x.name && !x.address.startsWith(x.name) ? `${x.name}, ${x.address}` : x.address }));
+  } catch (e) {}
+  // Respaldo: geocodificador del celular con varias formas de escribir la dirección colombiana
+  const base = t.replace(/\s*(#|No\.?|N°|nro\.?)\s*/gi, ' # ').replace(/\s+/g, ' ').trim();
+  const withCity = s => (city && !s.includes(',') ? `${s}, ${city}` : s) + ', Colombia';
+  const variants = [...new Set([withCity(base), withCity(base.replace(/ # /g, ' ')), withCity(base.replace(/ # /g, ' No. '))])];
+  const out = [];
+  for (const v of variants) {
+    try {
+      const res = await Location.geocodeAsync(v);
+      for (const r of res.slice(0, 2)) {
+        if (out.some(o => Math.abs(o.lat - r.latitude) < 0.0005 && Math.abs(o.lng - r.longitude) < 0.0005)) continue;
+        if (near && hav(near, { lat: r.latitude, lng: r.longitude }) > 80) continue;
+        out.push({ lat: r.latitude, lng: r.longitude, name: null });
+      }
+    } catch (e) {}
+    if (out.length >= 3) break;
+  }
+  for (const o of out) o.name = await nameOf(o.lat, o.lng);
+  return out;
+};
 // Contactos de confianza (se guardan solo en el celular)
 const CK = 'cq_contacts';
 // WhatsApp de soporte de CERQUITA
@@ -686,22 +713,34 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
   const price = pr ?? k?.ref ?? 0;
 
   // Búsqueda de direcciones escritas (geocodificación)
-  const geo = async text => {
-    try {
-      let q = text.trim();
-      if (!q.includes(',') && o && o.name !== 'Sin ubicación') {
-        const [a] = await Location.reverseGeocodeAsync({ latitude: o.lat, longitude: o.lng });
-        const ciudad = a?.city || a?.subregion;
-        if (ciudad) q = `${q}, ${ciudad}`;
-      }
-      const res = await Location.geocodeAsync(`${q}, Colombia`);
-      if (!res.length) return null;
-      const { latitude: lat, longitude: lng } = res[0];
-      return { lat, lng, name: await nameOf(lat, lng) };
-    } catch (e) { return null; }
-  };
+  // Ciudad del pasajero (para completar direcciones escritas sin ciudad)
+  const cityRef = useRef('');
+  useEffect(() => { if (!o || o.name === 'Sin ubicación' || cityRef.current) return; Location.reverseGeocodeAsync({ latitude: o.lat, longitude: o.lng }).then(([a]) => { cityRef.current = a?.city || a?.subregion || ''; }).catch(() => {}); }, [o?.lat]);
+  const nearPt = o && o.name !== 'Sin ubicación' ? o : null;
+  const geo = async text => (await searchPlaces(text, nearPt, cityRef.current))[0] || null;
+  // Sugerencias mientras el pasajero escribe el destino
+  const [sug, setSug] = useState([]), [sugBusy, setSugBusy] = useState(false);
+  const typed = useRef(false), sugT = useRef(null);
+  useEffect(() => {
+    clearTimeout(sugT.current);
+    if (!typed.current || dq.trim().length < 4) { setSug([]); return; }
+    sugT.current = setTimeout(async () => {
+      setSugBusy(true);
+      const res = await searchPlaces(dq, nearPt, cityRef.current);
+      setSugBusy(false);
+      if (typed.current) setSug(res.slice(0, 5));
+    }, 900);
+    return () => clearTimeout(sugT.current);
+  }, [dq]);
+  const chooseDest = g => { typed.current = false; setSug([]); setPr(null); setDest(g); setDq(g.name); setPicker('d'); };
   const findO = async () => { if (!oq.trim()) return; const g = await geo(oq); if (!g) return Alert.alert('CERQUITA', 'No encontré esa dirección. Prueba con calle, número y barrio (ej: Calle 50 #45-10, Bello). Si estás en otra ciudad, escribe también su nombre.'); setO(g); setOq(g.name); };
-  const findD = async () => { if (!dq.trim()) return; const g = await geo(dq); if (!g) return Alert.alert('CERQUITA', 'No encontré esa dirección. Prueba con calle, número y barrio, o toca el mapa.'); setPr(null); setDest(g); setDq(g.name); };
+  const findD = async () => {
+    if (!dq.trim()) return;
+    if (sug.length) return chooseDest(sug[0]);
+    setSugBusy(true); const g = await geo(dq); setSugBusy(false);
+    if (!g) return Alert.alert('CERQUITA', 'No encontré esa dirección. Prueba con calle, número y barrio, o toca el 📍 rojo y busca el lugar moviendo el mapa.');
+    chooseDest(g);
+  };
   const myLoc = async () => { try { const p = (await Location.getCurrentPositionAsync({})).coords; const nm = await nameOf(p.latitude, p.longitude); setO({ lat: p.latitude, lng: p.longitude, name: nm }); setOq(nm); } catch (e) { Alert.alert('CERQUITA', 'Activa el GPS y el permiso de ubicación.'); } };
 
   const PayBox = () => (D.pay ? (
@@ -724,7 +763,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
     if (error) return Alert.alert('CERQUITA', error.message);
     setPromoMsg(data.ok ? { ok: true, t: `✔ Descuento estimado: ${$c(data.discount)} (lo asume CERQUITA)` } : { ok: false, t: data.message });
   };
-  const pick = async e => { if (r) return; const { latitude: lat, longitude: lng } = e.nativeEvent.coordinate; setPr(null); const nm = await nameOf(lat, lng); setDest({ lat, lng, name: nm }); setDq(nm); };
+  const pick = async e => { if (r) return; const { latitude: lat, longitude: lng } = e.nativeEvent.coordinate; setPr(null); typed.current = false; setSug([]); const nm = await nameOf(lat, lng); setDest({ lat, lng, name: nm }); setDq(nm); };
   const request = async () => {
     if (pSusp) return setSuspOpen(true);
     if (!o || o.name === 'Sin ubicación') return Alert.alert('CERQUITA', 'Primero indica tu punto de recogida: activa el GPS o escribe tu dirección y toca Buscar.');
@@ -860,11 +899,14 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
             </>}
             <Text style={[s.h, { marginTop: 4 }]}>¿A dónde y por cuánto?</Text>
             <View style={[s.input, { flexDirection: 'row', alignItems: 'center', paddingVertical: 0, paddingRight: 4 }]}>
-              <TextInput style={{ flex: 1, paddingVertical: 12, fontSize: 16, color: C.fg }} placeholderTextColor={C.mut} placeholder="¿A dónde vas?" value={dq} onChangeText={setDq} onSubmitEditing={findD} returnKeyType="search" />
-              {dq.trim().length > 0 && !d && <T onPress={findD} style={{ padding: 8 }}><Text style={{ color: C.p, fontWeight: '700' }}>Buscar</Text></T>}
+              <TextInput style={{ flex: 1, paddingVertical: 12, fontSize: 16, color: C.fg }} placeholderTextColor={C.mut} placeholder="¿A dónde vas? Escribe dirección o lugar" value={dq} onChangeText={t => { typed.current = true; setDq(t); if (d) setDest(null); }} onSubmitEditing={findD} returnKeyType="search" />
+              {sugBusy ? <ActivityIndicator color={C.p} style={{ marginHorizontal: 8 }} /> : dq.trim().length > 0 && !d && <T onPress={findD} style={{ padding: 8 }}><Text style={{ color: C.p, fontWeight: '700' }}>Buscar</Text></T>}
               <T onPress={() => o ? setPicker('d') : Alert.alert('CERQUITA', 'Primero necesitamos tu ubicación de recogida.')} style={{ backgroundColor: '#fdecee', borderRadius: 10, padding: 8 }} accessibilityLabel="Elegir destino en el mapa"><Text style={{ fontSize: 20 }}>📍</Text></T>
             </View>
-            <Mut>Toca el 📍 rojo para elegir tu destino en el mapa y poner tu precio.</Mut>
+            {sug.length > 0 && <View style={{ borderWidth: 1, borderColor: C.br, borderRadius: 10, marginTop: -6, marginBottom: 8, backgroundColor: C.card }}>
+              {sug.map((g, i) => <T key={i} onPress={() => chooseDest(g)} style={{ flexDirection: 'row', alignItems: 'center', padding: 10, borderTopWidth: i ? 1 : 0, borderTopColor: '#eef1f4' }}><Text style={{ fontSize: 16, marginRight: 8 }}>📍</Text><Text style={{ flex: 1, color: C.fg }} numberOfLines={2}>{g.name}</Text></T>)}
+            </View>}
+            <Mut>Escribe la dirección y elige una sugerencia, o toca el 📍 rojo para buscarla en el mapa. Luego confirmas el punto y pones tu precio.</Mut>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginVertical: 10 }}>
               {Object.values(cats).map(x => <Chip key={x.code} t={`${x.name.replace('CERQUITA ', '')} · ${counts[x.code] || 0}`} on={c === x.code} color={C.p} onPress={() => { setC(x.code); setPr(null); }} />)}
             </ScrollView>
