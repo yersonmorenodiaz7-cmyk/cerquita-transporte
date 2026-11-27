@@ -1,9 +1,9 @@
 import 'react-native-url-polyfill/auto';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, Image, Linking, Platform, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity as T, Vibration, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Image, Linking, Modal, Platform, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity as T, Vibration, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Circle, Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
@@ -39,6 +39,35 @@ const q = async p => { const { data, error } = await p; if (error) { console.log
 const m = async p => { const { error } = await p; if (error) { Alert.alert('CERQUITA', error.message); return false; } return true; };
 const nameOf = async (lat, lng) => { try { const [a] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng }); return [a?.street || a?.name, a?.district || a?.city].filter(Boolean).join(', ') || 'Punto seleccionado'; } catch (e) { return 'Punto seleccionado'; } };
 const pt = o => ({ latitude: o.lat, longitude: o.lng });
+// Tarifa recomendada (misma fórmula que el servidor)
+const fareFor = (cfg, cc, km, code) => { km = Math.max(.3, km); const kk = Math.round(km * 10) / 10; const ref = Math.round(Math.max(cc.min_fare || 0, cfg.base_fare * cc.base_multiplier + kk * cc.per_km) / 500) * 500; return { km: kk, min: Math.max(4, Math.ceil(km / (code === 'moto' ? 30 : 24) * 60)), ref, lo: Math.ceil(ref * cfg.min_offer_pct / 100), hi: Math.floor(ref * cfg.max_offer_pct / 100) }; };
+// Suspensiones: textos de fecha y tiempo restante
+const isForever = u => String(u || '').includes('infinity');
+const untilTxt = u => !u ? '' : isForever(u) ? 'hasta nuevo aviso' : 'hasta el ' + new Date(u).toLocaleString('es-CO', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+const leftTxt = u => { if (!u || isForever(u)) return ''; const t = Math.max(0, new Date(u).getTime() - Date.now()) / 60000, h = Math.floor(t / 60); return h >= 24 ? `Faltan ${Math.floor(h / 24)} d ${h % 24} h` : `Faltan ${h} h ${Math.round(t % 60)} min`; };
+// Contactos de confianza (se guardan solo en el celular)
+const CK = 'cq_contacts';
+const loadContacts = async () => { try { return JSON.parse(await AsyncStorage.getItem(CK)) || []; } catch (e) { return []; } };
+const saveContacts = list => AsyncStorage.setItem(CK, JSON.stringify(list));
+const waPhone = p => { const d = String(p || '').replace(/\D/g, ''); return d.length === 10 ? '57' + d : d; };
+// Foto del conductor (solo la ve el pasajero que recibió su oferta)
+const usePhoto = driverId => {
+  const [u, setU] = useState(null);
+  useEffect(() => {
+    let alive = true; setU(null);
+    if (!driverId) return;
+    (async () => {
+      try {
+        const { data: p } = await supabase.rpc('driver_photo_path', { p_driver: driverId });
+        if (!p || !alive) return;
+        const { data } = await supabase.storage.from('driver-docs').createSignedUrl(p, 3600);
+        if (alive && data?.signedUrl) setU(data.signedUrl);
+      } catch (e) {}
+    })();
+    return () => { alive = false; };
+  }, [driverId]);
+  return u;
+};
 
 // ===== Componentes básicos =====
 const Btn = ({ t, onPress, color = C.p, ghost, small, style }) => (
@@ -52,6 +81,24 @@ const Chip = ({ t, on, onPress, color }) => (
 const Card = ({ children }) => <View style={s.card}>{children}</View>;
 const Mut = ({ children }) => <Text style={{ color: C.mut, fontSize: 13 }}>{children}</Text>;
 const Input = props => <TextInput placeholderTextColor={C.mut} {...props} style={[s.input, props.style]} />;
+const Avatar = ({ driverId, name, size = 52 }) => {
+  const u = usePhoto(driverId);
+  if (u) return <Image source={{ uri: u }} style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: C.bg }} />;
+  return <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: '#e7f6ed', alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: '#0c7a3b', fontWeight: '800', fontSize: size * 0.4 }}>{(name || '?').trim().charAt(0).toUpperCase()}</Text></View>;
+};
+const Popup = ({ open, onClose, icon, iconBg, title, children, btn = 'Entendido', color = C.p, extra }) => (
+  <Modal visible={!!open} transparent animationType="fade" onRequestClose={onClose}>
+    <View style={s.dim}>
+      <View style={s.popup}>
+        <View style={[s.popIcon, { backgroundColor: iconBg }]}><Text style={{ fontSize: 30 }}>{icon}</Text></View>
+        <Text style={{ fontSize: 21, fontWeight: '800', textAlign: 'center', color: C.fg, marginBottom: 8 }}>{title}</Text>
+        {children}
+        <Btn t={btn} color={color} onPress={onClose} style={{ marginTop: 14 }} />
+        {extra}
+      </View>
+    </View>
+  </Modal>
+);
 
 // ===== Raíz: sesión =====
 // Si algo falla al dibujar la app, muestra el error en pantalla en vez de cerrarse sin explicación
@@ -126,6 +173,7 @@ function Auth() {
 // ===== Principal: datos compartidos y tiempo real =====
 function Main({ user }) {
   const uid = user.id;
+  const [menuOpen, setMenuOpen] = useState(false), [sheet, setSheet] = useState(null);
   const [role, setRole] = useState('p'), [B, setB] = useState(null), [D, setD] = useState({ offers: [], req: [], mo: [], dh: [], rides: [], docs: [], wallet: [], seen: 0 });
   const timer = useRef(null);
 
@@ -137,9 +185,9 @@ function Main({ user }) {
     let offers = [], pd = null, loc = null, pay = null, seen = 0;
     if (ride && ride.status === 'searching') seen = (await supabase.from('ride_views').select('id', { count: 'exact', head: true }).eq('ride_id', ride.id)).count || 0;
     if (ride) {
-      if (ride.status === 'searching') offers = (await q(supabase.from('offers').select('*,drivers(display_name,rating_avg,pay_info,vehicles(model,plate))').eq('ride_id', ride.id).eq('status', 'pending').order('price'))) || [];
+      if (ride.status === 'searching') offers = (await q(supabase.from('offers').select('*,drivers(display_name,rating_avg,pay_info,vehicles(model,plate,color))').eq('ride_id', ride.id).eq('status', 'pending').order('price'))) || [];
       else if (ride.driver_id) {
-        pd = (await q(supabase.from('drivers').select('user_id,display_name,rating_avg,pay_info,vehicles(model,plate)').eq('id', ride.driver_id).maybeSingle())) || null;
+        pd = (await q(supabase.from('drivers').select('id,user_id,display_name,rating_avg,pay_info,vehicles(model,plate,color)').eq('id', ride.driver_id).maybeSingle())) || null;
         loc = (await q(supabase.from('driver_locations').select('lat,lng').eq('driver_id', ride.driver_id).maybeSingle())) || null;
         pay = (await q(supabase.from('payments').select('amount,discount_amount,status,method').eq('ride_id', ride.id).maybeSingle())) || null;
       }
@@ -154,7 +202,8 @@ function Main({ user }) {
       dh = (await q(supabase.from('payments').select('amount,commission_amount,rides!inner(driver_id,status)').eq('rides.driver_id', drv.id).eq('rides.status', 'completed').limit(100))) || [];
       plan = ((await q(supabase.from('driver_subscriptions').select('ends_at,plans(name,commission_pct)').eq('driver_id', drv.id).gt('ends_at', new Date().toISOString()).order('ends_at', { ascending: false }).limit(1))) || [])[0] || null;
     }
-    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan, rides, pay, docs, wallet, seen });
+    const susp = (await q(supabase.rpc('my_suspension'))) || null;
+    setD({ drv, ride, offers, pd, loc, req, mo, cur, dh, plan, rides, pay, docs, wallet, seen, susp });
   }, [uid]);
 
   useEffect(() => {
@@ -168,7 +217,12 @@ function Main({ user }) {
     const deb = () => { clearTimeout(timer.current); timer.current = setTimeout(refresh, 300); };
     const ch = supabase.channel('cq-' + uid);
     ['rides', 'offers', 'driver_locations', 'ride_views'].forEach(t => ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, deb));
-    ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications', filter: 'user_id=eq.' + uid }, p => Alert.alert(p.new.title, p.new.body || ''));
+    ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications', filter: 'user_id=eq.' + uid }, p => {
+      // El aviso de llegada del conductor se muestra con su propia ventana en la pantalla del viaje
+      if ((p.new.title || '').includes('Tu conductor llegó')) return;
+      Alert.alert(p.new.title, p.new.body || '');
+      if ((p.new.title || '').includes('uspen')) refresh();
+    });
     ch.subscribe();
     return () => { clearTimeout(timer.current); supabase.removeChannel(ch); };
   }, [uid, refresh]);
@@ -213,20 +267,182 @@ function Main({ user }) {
     { text: 'Cerrar', style: 'cancel' },
   ]);
   const staff = ['operador', 'supervisor', 'admin'].includes(B.p?.role);
-  const tabs = [['p', 'Pasajero', C.p], ['d', 'Conductor', C.d]].concat(staff ? [['a', 'Admin', '#6d4aff']] : []);
   const props = { uid, cfg: B.cfg, cats: B.cats, D, refresh };
+  const go = k => {
+    if (['p', 'd', 'a'].includes(k)) return setRole(k);
+    if (k === 'config') return menu();
+    if (k === 'logout') return supabase.auth.signOut();
+    if (k === 'promo') return Alert.alert('Códigos de descuento', 'Escribe tu código en el campo «Código de descuento» antes de tocar «Proponer mi precio». El descuento lo asume CERQUITA.');
+    if (k === 'legal') return Alert.alert('Términos y privacidad', 'Elige qué quieres leer', [
+      { text: 'Términos y condiciones', onPress: () => Linking.openURL(WEB + 'terminos.html') },
+      { text: 'Política de privacidad', onPress: () => Linking.openURL(WEB + 'privacidad.html') },
+      { text: 'Cerrar', style: 'cancel' },
+    ]);
+    setSheet(k);
+  };
   return (
     <View style={{ flex: 1 }}>
       <View style={s.top}>
         <Text style={s.logo}>📍 CERQUITA</Text>
-        {tabs.map(([k, l, col]) => <Chip key={k} t={l} on={role === k} color={col} onPress={() => setRole(k)} />)}
-        <Chip t="⚙️" onPress={menu} />
-        <Chip t="Salir" onPress={() => supabase.auth.signOut()} />
+        {role !== 'p' && <Text style={{ color: role === 'd' ? C.d : '#6d4aff', fontWeight: '700', marginRight: 10 }}>{role === 'd' ? 'Modo conductor' : 'Admin'}</Text>}
+        <T onPress={() => setMenuOpen(true)} accessibilityLabel="Abrir menú" style={s.burger}><Text style={{ fontSize: 22, color: C.fg }}>☰</Text></T>
       </View>
+      <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} name={B.p?.full_name} role={role} staff={staff} go={go} />
+      <InfoSheet k={sheet} onClose={() => setSheet(null)} uid={uid} rides={D.rides || []} />
       {role === 'p' && <Passenger {...props} />}
       {role === 'd' && <Driver {...props} />}
-      {role === 'a' && <ScrollView contentContainerStyle={{ padding: 12 }}><Card><Text style={s.h}>Administración</Text><Mut>El panel de administración (conductores, tarifas, viajes y alertas) está en la versión web.</Mut><Btn t="Abrir panel web" color="#6d4aff" onPress={() => Linking.openURL(WEB)} style={{ marginTop: 10 }} /></Card></ScrollView>}
+      {role === 'a' && <ScrollView contentContainerStyle={{ padding: 12 }}><Card><Text style={s.h}>Administración</Text><Mut>El panel de administración (conductores, tarifas, viajes y alertas) está en la versión web.</Mut><Btn t="Abrir panel web" color="#6d4aff" onPress={() => Linking.openURL(WEB + 'admin.html')} style={{ marginTop: 10 }} /></Card></ScrollView>}
     </View>
+  );
+}
+
+// ===== Menú lateral (☰ arriba a la derecha, como inDrive) =====
+function SideMenu({ open, onClose, name, role, staff, go }) {
+  const it = (icon, t, k) => <T key={k} onPress={() => { onClose(); setTimeout(() => go(k), 250); }} style={s.mItem}><Text style={{ fontSize: 20, width: 34 }}>{icon}</Text><Text style={{ fontSize: 16, color: C.fg }}>{t}</Text></T>;
+  return (
+    <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={{ flex: 1, flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.4)' }}>
+        <T style={{ flex: 1 }} onPress={onClose} activeOpacity={1} />
+        <View style={s.drawer}>
+          <ScrollView>
+            <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: C.br, marginBottom: 6 }}>
+              <View style={{ width: 48, height: 48, borderRadius: 24, backgroundColor: '#e8f0ff', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}><Text style={{ fontSize: 20, fontWeight: '800', color: C.p }}>{(name || '?').trim().charAt(0).toUpperCase()}</Text></View>
+              <View style={{ flex: 1 }}><Text style={{ fontWeight: '800', fontSize: 17 }} numberOfLines={1}>{name || 'Mi cuenta'}</Text><Mut>{role === 'd' ? 'Modo conductor' : 'Modo pasajero'}</Mut></View>
+            </View>
+            {it('🏙️', 'Ciudad', 'city')}
+            {it('🕘', 'Historial de viajes', 'history')}
+            {it('🛡️', 'Seguridad', 'safety')}
+            {it('👥', 'Contactos de confianza', 'contacts')}
+            {it('🏷️', 'Códigos de descuento', 'promo')}
+            {it('⚙️', 'Configuración', 'config')}
+            {it('💬', 'Ayuda y soporte', 'help')}
+            {it('📄', 'Términos y privacidad', 'legal')}
+            {staff && it('🛠️', 'Administración', 'a')}
+            <Btn t={role === 'd' ? 'Modo pasajero' : 'Modo conductor'} color={role === 'd' ? C.p : C.d} onPress={() => { onClose(); go(role === 'd' ? 'p' : 'd'); }} style={{ marginTop: 16 }} />
+            <T onPress={() => { onClose(); go('logout'); }}><Text style={{ color: C.red, textAlign: 'center', marginVertical: 16, fontWeight: '700' }}>Cerrar sesión</Text></T>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// Hoja inferior genérica
+const Sheet = ({ open, onClose, title, children }) => (
+  <Modal visible={!!open} transparent animationType="slide" onRequestClose={onClose}>
+    <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' }}>
+      <View style={s.sheet}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+          <Text style={[s.h, { flex: 1, marginBottom: 0 }]}>{title}</Text>
+          <T onPress={onClose} style={{ padding: 6 }}><Text style={{ fontSize: 20, color: C.mut }}>✕</Text></T>
+        </View>
+        <ScrollView keyboardShouldPersistTaps="handled">{children}</ScrollView>
+      </View>
+    </View>
+  </Modal>
+);
+
+// Contactos de confianza (lista guardada en el celular)
+function Contacts({ onPick }) {
+  const [list, setList] = useState([]), [n, setN] = useState(''), [p, setP] = useState('');
+  useEffect(() => { loadContacts().then(setList); }, []);
+  const add = async () => {
+    if (!n.trim() || waPhone(p).length < 10) return Alert.alert('CERQUITA', 'Escribe el nombre y un celular de 10 números.');
+    const l = [...list, { name: n.trim(), phone: p.trim() }]; setList(l); await saveContacts(l); setN(''); setP('');
+  };
+  const del = async i => { const l = list.filter((_, j) => j !== i); setList(l); await saveContacts(l); };
+  return (
+    <View>
+      {list.length === 0 && <Mut>Aún no tienes contactos de confianza. Agrégalos para compartir tus viajes con un toque.</Mut>}
+      {list.map((x, i) => (
+        <View key={i} style={s.offer}>
+          <View style={{ flex: 1 }}><Text style={{ fontWeight: '700' }}>{x.name}</Text><Mut>{x.phone}</Mut></View>
+          {onPick ? <Btn t="Enviar" small color={C.d} onPress={() => onPick(x)} /> : <Btn t="Quitar" ghost small onPress={() => del(i)} />}
+        </View>
+      ))}
+      {!onPick && <View style={{ marginTop: 12 }}>
+        <Input placeholder="Nombre (ej: Mamá)" value={n} onChangeText={setN} />
+        <Input placeholder="Celular (ej: 3001234567)" value={p} onChangeText={setP} keyboardType="phone-pad" />
+        <Btn t="Agregar contacto" onPress={add} />
+      </View>}
+    </View>
+  );
+}
+
+function CityInfo() {
+  const [c, setC] = useState('Buscando…');
+  useEffect(() => { (async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return setC('Activa el permiso de ubicación');
+      const p = (await Location.getLastKnownPositionAsync()) || (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
+      const [a] = await Location.reverseGeocodeAsync({ latitude: p.coords.latitude, longitude: p.coords.longitude });
+      setC([a?.city || a?.subregion, a?.region].filter(Boolean).join(', ') || 'No identificada');
+    } catch (e) { setC('No identificada'); }
+  })(); }, []);
+  return <View><Text style={{ fontSize: 18, fontWeight: '800', marginBottom: 6 }}>📍 {c}</Text><Mut>CERQUITA usa tu ubicación para mostrarte el mapa de tu ciudad y los conductores cercanos. Si viajas a otra ciudad, se actualiza sola.</Mut></View>;
+}
+
+function InfoSheet({ k, onClose, uid, rides }) {
+  const T_ = { city: 'Ciudad', history: 'Historial de viajes', safety: 'Seguridad', contacts: 'Contactos de confianza', help: 'Ayuda y soporte' };
+  return (
+    <Sheet open={!!k} onClose={onClose} title={T_[k] || ''}>
+      {k === 'city' && <CityInfo />}
+      {k === 'history' && (rides.some(x => ['completed', 'cancelled', 'expired'].includes(x.status)) ? <History rides={rides} /> : <Mut>Aún no tienes viajes terminados.</Mut>)}
+      {k === 'safety' && <View>
+        <Text style={{ marginBottom: 8 }}>• Antes de subir, revisa que la <Text style={{ fontWeight: '700' }}>placa, el carro y la foto</Text> del conductor coincidan con la app.</Text>
+        <Text style={{ marginBottom: 8 }}>• Durante el viaje toca el <Text style={{ fontWeight: '700' }}>escudo 🛡️</Text> del mapa para compartir tu viaje en vivo por WhatsApp o pedir ayuda.</Text>
+        <Text style={{ marginBottom: 8 }}>• El botón <Text style={{ fontWeight: '700' }}>Emergencia</Text> avisa al centro de operaciones de CERQUITA con tu ubicación.</Text>
+        <Btn t="📞 Llamar a la Policía (123)" color={C.red} onPress={() => Linking.openURL('tel:123')} style={{ marginTop: 8 }} />
+      </View>}
+      {k === 'contacts' && <Contacts />}
+      {k === 'help' && <View><Mut>Cuéntanos tu problema y te responderemos pronto.</Mut><Report uid={uid} /></View>}
+    </Sheet>
+  );
+}
+
+// Mapa a pantalla completa para elegir el destino y el precio (como inDrive)
+function MapPicker({ open, onClose, start, title = 'Mueve el mapa hasta tu destino', onConfirm, priced, cfg, cat, catCode, from, confirmText }) {
+  const [ctr, setCtr] = useState(null), [nm, setNm] = useState(''), [pr, setPr] = useState(null);
+  const tm = useRef(null);
+  useEffect(() => { if (open && start) { setCtr({ lat: start.lat, lng: start.lng }); setNm(start.name || ''); setPr(null); } }, [open]);
+  const moved = reg => {
+    const c = { lat: reg.latitude, lng: reg.longitude }; setCtr(c); setNm('Buscando dirección…');
+    clearTimeout(tm.current); tm.current = setTimeout(async () => setNm(await nameOf(c.lat, c.lng)), 600);
+  };
+  const k = priced && from && ctr && cat && hav(from, ctr) > 0.05 ? fareFor(cfg, cat, hav(from, ctr) * 1.3, catCode) : null;
+  const price = pr ?? k?.ref ?? 0;
+  if (!open || !start) return null;
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: C.bg }}>
+        <View style={{ flex: 1 }}>
+          <MapView provider={PROVIDER_GOOGLE} style={{ flex: 1 }} showsUserLocation initialRegion={{ latitude: start.lat, longitude: start.lng, latitudeDelta: .02, longitudeDelta: .02 }} onRegionChangeComplete={moved} />
+          <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ fontSize: 40, marginBottom: 40 }}>📍</Text>
+          </View>
+          <T onPress={onClose} style={s.backBtn}><Text style={{ fontSize: 22 }}>←</Text></T>
+          <View style={s.addrTop}><Mut>{title}</Mut><Text style={{ fontWeight: '700', fontSize: 15 }} numberOfLines={2}>{nm}</Text></View>
+        </View>
+        <View style={s.sheet}>
+          {priced && k && <>
+            <Mut>{k.km} km · ~{k.min} min (aproximado)</Mut>
+            <Text style={{ fontWeight: '800', marginTop: 8 }}>¿Cuánto quieres pagar?</Text>
+            <View style={[s.row, { marginTop: 6 }]}>
+              <Btn t="−" ghost small onPress={() => setPr(Math.max(500, price - 500))} />
+              <TextInput style={[s.input, { flex: 1, textAlign: 'center', fontSize: 24, fontWeight: '800', marginBottom: 0 }]} keyboardType="numeric" value={String(price)} onChangeText={t => setPr(Number(t.replace(/[^0-9]/g, '')) || 0)} />
+              <Btn t="+" ghost small onPress={() => setPr(price + 500)} />
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#e8f0ff', borderRadius: 12, padding: 10, marginTop: 10 }}>
+              <View style={{ flex: 1 }}><Mut>Tarifa recomendada</Mut><Text style={{ fontWeight: '800', fontSize: 18, color: C.p }}>{$c(k.ref)}</Text></View>
+              <Btn t="Usar este" small onPress={() => setPr(k.ref)} />
+            </View>
+            {price > 0 && price < k.ref && <Text style={{ color: C.red, marginTop: 6 }}>⚠️ Tu oferta está por debajo de la recomendada: puede que pocos conductores la acepten.</Text>}
+          </>}
+          <Btn t={confirmText || (priced ? 'Confirmar destino y precio' : 'Confirmar ubicación')} color={priced ? C.p : C.d} style={{ marginTop: 12 }} onPress={() => { if (!ctr) return; onConfirm({ lat: ctr.lat, lng: ctr.lng, name: nm && nm !== 'Buscando dirección…' ? nm : `${ctr.lat.toFixed(5)}, ${ctr.lng.toFixed(5)}` }, priced && k ? price : null); }} />
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -405,16 +621,29 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
   const [o, setO] = useState(null), [d, setDest] = useState(null), [c, setC] = useState('carro'), [pr, setPr] = useState(null), [pay, setPay] = useState('efectivo'), [busy, setBusy] = useState(false), [oq, setOq] = useState(''), [dq, setDq] = useState(''), [promo, setPromo] = useState(''), [promoMsg, setPromoMsg] = useState(null), [note, setNote] = useState(''), [photo, setPhoto] = useState(null);
   const mr = useRef(null);
   const r = D.ride;
+  const [picker, setPicker] = useState(null), [editO, setEditO] = useState(false), [help, setHelp] = useState(false), [shareTo, setShareTo] = useState(false), [warn, setWarn] = useState(null), [suspOpen, setSuspOpen] = useState(false), [arrOpen, setArrOpen] = useState(false);
+  const susp = D.susp || {};
+  const pSusp = susp.passenger_until && (isForever(susp.passenger_until) || new Date(susp.passenger_until) > new Date());
   useEffect(() => {
     (async () => {
       let lat = 4.7110, lng = -74.0721, ok = false;
-      try { const { status } = await Location.requestForegroundPermissionsAsync(); if (status === 'granted') { const p = (await Location.getCurrentPositionAsync({})).coords; lat = p.latitude; lng = p.longitude; ok = true; } } catch (e) {}
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          // Primero la última ubicación conocida (rápida), luego la actual
+          const last = await Location.getLastKnownPositionAsync().catch(() => null);
+          if (last) { lat = last.coords.latitude; lng = last.coords.longitude; ok = true; setO(v => v || { lat, lng, name: 'Ubicándote…' }); }
+          const p = await Promise.race([Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }), new Promise(res => setTimeout(() => res(null), 12000))]).catch(() => null);
+          if (p) { lat = p.coords.latitude; lng = p.coords.longitude; ok = true; }
+        }
+      } catch (e) {}
       const nm = ok ? await nameOf(lat, lng) : 'Sin ubicación';
       setO({ lat, lng, name: nm }); setOq(ok ? nm : '');
       if (!ok) Alert.alert('CERQUITA', 'No pudimos ubicarte. Activa el GPS o escribe tu dirección de recogida.');
     })();
   }, []);
-  useEffect(() => { if (o && !d && !r) mr.current?.animateToRegion({ latitude: o.lat, longitude: o.lng, latitudeDelta: .04, longitudeDelta: .04 }, 400); }, [o]);
+  const centerOn = () => { if (o && !d && !r) mr.current?.animateToRegion({ latitude: o.lat, longitude: o.lng, latitudeDelta: .04, longitudeDelta: .04 }, 400); };
+  useEffect(centerOn, [o]);
   useEffect(() => {
     const pad = { top: 60, right: 60, bottom: 60, left: 60 };
     if (r) mr.current?.fitToCoordinates([{ latitude: r.origin_lat, longitude: r.origin_lng }, { latitude: r.dest_lat, longitude: r.dest_lng }], { edgePadding: pad, animated: true });
@@ -488,6 +717,7 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
   };
   const pick = async e => { if (r) return; const { latitude: lat, longitude: lng } = e.nativeEvent.coordinate; setPr(null); const nm = await nameOf(lat, lng); setDest({ lat, lng, name: nm }); setDq(nm); };
   const request = async () => {
+    if (pSusp) return setSuspOpen(true);
     if (!o || o.name === 'Sin ubicación') return Alert.alert('CERQUITA', 'Primero indica tu punto de recogida: activa el GPS o escribe tu dirección y toca Buscar.');
     if (!k) return Alert.alert('CERQUITA', 'Toca el mapa para elegir tu destino.');
     if (price < k.lo || price > k.hi) return Alert.alert('CERQUITA', `Tu oferta debe estar entre ${$c(k.lo)} y ${$c(k.hi)}.`);
@@ -505,12 +735,24 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
       const up = await supabase.storage.from('ride-photos').upload(photoPath, b64ToBuffer(photo.b64), { contentType: 'image/jpeg' });
       if (up.error) { setBusy(false); return Alert.alert('CERQUITA', 'No se pudo subir la foto: ' + up.error.message); }
     }
-    const ok = await m(supabase.from('rides').insert({ passenger_id: uid, category: c, origin_name: o.name, origin_lat: o.lat, origin_lng: o.lng, dest_name: d.name, dest_lat: d.lat, dest_lng: d.lng, offered_fare: price, payment_method: pay, promo_code: promo.trim() || null, pickup_note: note.trim() || null, pickup_photo_path: photoPath, route_km: pre.routes[0] ? k.km : null }));
+    const ins = await supabase.from('rides').insert({ passenger_id: uid, category: c, origin_name: o.name, origin_lat: o.lat, origin_lng: o.lng, dest_name: d.name, dest_lat: d.lat, dest_lng: d.lng, offered_fare: price, payment_method: pay, promo_code: promo.trim() || null, pickup_note: note.trim() || null, pickup_photo_path: photoPath, route_km: pre.routes[0] ? k.km : null });
+    const ok = !ins.error;
+    if (ins.error) {
+      if ((ins.error.message || '').includes('suspendida')) { await refresh(); setSuspOpen(true); }
+      else Alert.alert('CERQUITA', ins.error.message);
+    }
     setBusy(false); if (ok) { setPr(null); setDest(null); setPromo(''); setPromoMsg(null); setNote(''); setPhoto(null); refresh(); }
   };
   const rejectOffer = async id => { const { error } = await supabase.rpc('reject_offer', { p_offer: id }); if (error) Alert.alert('CERQUITA', error.message); refresh(); };
   const accept = async id => { const { error } = await supabase.rpc('accept_offer', { p_offer: id }); if (error) Alert.alert('CERQUITA', 'La oferta ya no está disponible.'); refresh(); };
-  const cancel = async id => { const { error } = await supabase.rpc('cancel_ride', { p_ride: id }); if (error) Alert.alert('CERQUITA', error.message); refresh(); };
+  const cancel = async id => {
+    const had = !!r?.driver_id;
+    const { error } = await supabase.rpc('cancel_ride', { p_ride: id });
+    if (error) Alert.alert('CERQUITA', error.message);
+    else if (had) { const { data: n } = await supabase.rpc('my_cancel_count'); if (n >= 3) setWarn(n); }
+    refresh();
+  };
+  const askCancel = id => Alert.alert('Cancelar viaje', 'Tu conductor ya va en camino. Si cancelas muchas veces tu cuenta puede ser suspendida. ¿Cancelar de todas formas?', [{ text: 'No', style: 'cancel' }, { text: 'Sí, cancelar', style: 'destructive', onPress: () => cancel(id) }]);
   const rate = async n => { if (D.pd && await m(supabase.from('ratings').insert({ ride_id: r.id, from_user: uid, to_user: D.pd.user_id, stars: n }))) refresh(); };
   const sos = async () => { if (await m(supabase.from('sos_alerts').insert({ ride_id: r?.id, user_id: uid, lat: o?.lat, lng: o?.lng }))) Alert.alert('CERQUITA', 'Alerta enviada al centro de operaciones.'); };
 
@@ -547,14 +789,34 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
     const rr = rt.routes[rt.sel];
     if (r && rr?.pts?.length) mr.current?.fitToCoordinates(rr.pts, { edgePadding: { top: 70, right: 70, bottom: 70, left: 70 }, animated: true });
   }, [r?.status, rt.routes.length]);
-  const shareTrip = () => {
+  const shareTrip = async contact => {
+    let link = '';
+    const { data: tok, error } = await supabase.rpc('create_ride_share', { p_ride: r.id });
+    if (!error && tok) link = WEB + 'seguimiento.html?t=' + tok;
     const at = D.loc || o;
-    Share.share({ message: `Voy en un viaje CERQUITA con ${D.pd?.display_name || 'mi conductor'} (${veh?.model || ''} ${veh?.plate || ''}).\nRuta: ${r.origin_name} → ${r.dest_name}.\n${at ? `Ubicación: https://www.google.com/maps?q=${at.lat},${at.lng}` : ''}` });
+    const msg = `Voy en un viaje CERQUITA con ${D.pd?.display_name || 'mi conductor'} (${veh?.model || ''} ${veh?.color || ''}, placa ${veh?.plate || ''}).\nRuta: ${r.origin_name} → ${r.dest_name}.\n${link ? `Sígueme en vivo: ${link}` : at ? `Ubicación: https://www.google.com/maps?q=${at.lat},${at.lng}` : ''}`;
+    setShareTo(false); setHelp(false);
+    if (contact === 'other') return Share.share({ message: msg });
+    const url = `https://wa.me/${contact ? waPhone(contact.phone) : ''}?text=${encodeURIComponent(msg)}`;
+    Linking.openURL(url).catch(() => Share.share({ message: msg }));
   };
+  // Llegada del conductor: ventana con vibración y espera gratis de 5 minutos
+  const arrKey = useRef(null);
+  useEffect(() => {
+    if (r?.status === 'arrived' && arrKey.current !== r.id) { arrKey.current = r.id; setArrOpen(true); Vibration.vibrate([0, 600, 250, 600, 250, 600]); }
+    if (r?.status !== 'arrived') setArrOpen(false);
+  }, [r?.status, r?.id]);
+  const [tick, setTick] = useState(Date.now());
+  useEffect(() => { if (r?.status !== 'arrived') return; const t = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(t); }, [r?.status]);
+  const waitEnd = r?.arrived_at ? new Date(r.arrived_at).getTime() + 5 * 60000 : null;
+  // Tiempo de llegada en vivo (si no hay ruta, se estima con la distancia)
+  const rr0 = rt.routes[rt.sel];
+  const eta = target && drvPos ? (rr0 ? { min: mins(rr0.duration_traffic_s), km: rr0.distance_m / 1000 } : (() => { const km = hav(drvPos, target) * 1.3; return { min: Math.max(1, Math.ceil(km / (r?.category === 'moto' ? 30 : 24) * 60)), km }; })()) : null;
   const A = r ? { lat: r.origin_lat, lng: r.origin_lng } : o, B = r ? { lat: r.dest_lat, lng: r.dest_lng } : d;
   return (
     <View style={{ flex: 1 }}>
-      <MapView ref={mr} provider={PROVIDER_GOOGLE} showsTraffic style={{ height: r ? 360 : 280 }} showsUserLocation onPress={pick} initialRegion={{ latitude: 4.7110, longitude: -74.0721, latitudeDelta: .06, longitudeDelta: .06 }}>
+      <View>
+      <MapView ref={mr} key={o ? 'm1' : 'm0'} provider={PROVIDER_GOOGLE} showsTraffic style={{ height: r ? 360 : 280 }} showsUserLocation onPress={pick} onMapReady={centerOn} initialRegion={{ latitude: o?.lat ?? 4.7110, longitude: o?.lng ?? -74.0721, latitudeDelta: o ? .04 : .06, longitudeDelta: o ? .04 : .06 }}>
         {A && <Marker coordinate={pt(A)} pinColor="green" title="Origen" />}
         {B && <Marker coordinate={pt(B)} pinColor="red" title="Destino" />}
         {A && B && !r && <Polyline coordinates={[pt(A), pt(B)]} strokeColor={C.p} strokeWidth={3} />}
@@ -562,22 +824,38 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
         {drvPos && <Marker coordinate={pt(drvPos)} title="Tu conductor"><Text style={{ fontSize: 28 }}>🚕</Text></Marker>}
         {!r && near.map((x, i) => <Marker key={i} coordinate={pt(x)} title="Conductor cercano"><Text style={{ fontSize: 22 }}>🚕</Text></Marker>)}
       </MapView>
+      {r && ['accepted', 'ongoing'].includes(r.status) && eta && (
+        <View style={s.etaBox}><Text style={{ color: '#fff', fontWeight: '800', fontSize: 17 }}>{r.status === 'ongoing' ? 'Llegas en' : 'Llega en'} {eta.min} min</Text><Text style={{ color: '#dce8ff', fontSize: 13 }}>a {eta.km.toFixed(1)} km{r.status === 'accepted' ? ' de ti' : ' del destino'}</Text></View>
+      )}
+      {r && r.status === 'arrived' && <View style={[s.etaBox, { backgroundColor: C.d }]}><Text style={{ color: '#fff', fontWeight: '800', fontSize: 17 }}>Tu conductor llegó</Text></View>}
+      {r && ['accepted', 'arrived', 'ongoing'].includes(r.status) && <T onPress={() => setHelp(true)} style={s.shield} accessibilityLabel="Ayuda durante el viaje"><Text style={{ fontSize: 24 }}>🛡️</Text></T>}
+      </View>
       <ScrollView contentContainerStyle={{ padding: 12 }}>
         {!r && (
           <Card>
-            <Text style={s.h}>¿A dónde vas?</Text>
-            <Mut>Dirección de recogida</Mut>
-            <View style={[s.row, { marginBottom: 8 }]}>
-              <Input style={{ flex: 1, marginBottom: 0 }} placeholder="¿Dónde te recogemos?" value={oq} onChangeText={setOq} onSubmitEditing={findO} returnKeyType="search" />
-              <Btn t="Buscar" small onPress={findO} />
+            {pSusp && <T onPress={() => setSuspOpen(true)} style={{ backgroundColor: '#fdecee', borderRadius: 12, padding: 10, marginBottom: 10 }}><Text style={{ color: C.red, fontWeight: '700' }}>⛔ Cuenta suspendida {untilTxt(susp.passenger_until)}. Toca para ver detalles.</Text></T>}
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+              <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: C.d, marginRight: 10 }} />
+              <View style={{ flex: 1 }}><Mut>Estás aquí</Mut><Text style={{ fontWeight: '700', color: C.fg }} numberOfLines={2}>{o?.name || 'Ubicándote…'}</Text></View>
+              <T onPress={() => setEditO(v => !v)}><Text style={{ color: C.p, fontWeight: '700' }}>{editO ? 'Listo' : 'Cambiar'}</Text></T>
             </View>
-            <T onPress={myLoc}><Text style={{ color: C.p, marginBottom: 8 }}>📍 Usar mi ubicación actual</Text></T>
-            <Mut>Dirección de destino</Mut>
-            <View style={[s.row, { marginBottom: 4 }]}>
-              <Input style={{ flex: 1, marginBottom: 0 }} placeholder="¿A dónde vas?" value={dq} onChangeText={setDq} onSubmitEditing={findD} returnKeyType="search" />
-              <Btn t="Buscar" small onPress={findD} />
+            {editO && <>
+              <View style={[s.row, { marginBottom: 8 }]}>
+                <Input style={{ flex: 1, marginBottom: 0 }} placeholder="¿Dónde te recogemos?" value={oq} onChangeText={setOq} onSubmitEditing={findO} returnKeyType="search" />
+                <Btn t="Buscar" small onPress={findO} />
+              </View>
+              <View style={[s.row, { marginBottom: 8 }]}>
+                <T onPress={myLoc}><Text style={{ color: C.p, marginRight: 16 }}>📍 Usar mi ubicación actual</Text></T>
+                <T onPress={() => o && setPicker('o')}><Text style={{ color: C.p }}>🗺️ Elegir en el mapa</Text></T>
+              </View>
+            </>}
+            <Text style={[s.h, { marginTop: 4 }]}>¿A dónde y por cuánto?</Text>
+            <View style={[s.input, { flexDirection: 'row', alignItems: 'center', paddingVertical: 0, paddingRight: 4 }]}>
+              <TextInput style={{ flex: 1, paddingVertical: 12, fontSize: 16, color: C.fg }} placeholderTextColor={C.mut} placeholder="¿A dónde vas?" value={dq} onChangeText={setDq} onSubmitEditing={findD} returnKeyType="search" />
+              {dq.trim().length > 0 && !d && <T onPress={findD} style={{ padding: 8 }}><Text style={{ color: C.p, fontWeight: '700' }}>Buscar</Text></T>}
+              <T onPress={() => o ? setPicker('d') : Alert.alert('CERQUITA', 'Primero necesitamos tu ubicación de recogida.')} style={{ backgroundColor: '#fdecee', borderRadius: 10, padding: 8 }} accessibilityLabel="Elegir destino en el mapa"><Text style={{ fontSize: 20 }}>📍</Text></T>
             </View>
-            <Mut>También puedes tocar el mapa para marcar el destino.</Mut>
+            <Mut>Toca el 📍 rojo para elegir tu destino en el mapa y poner tu precio.</Mut>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginVertical: 10 }}>
               {Object.values(cats).map(x => <Chip key={x.code} t={`${x.name.replace('CERQUITA ', '')} · ${counts[x.code] || 0}`} on={c === x.code} color={C.p} onPress={() => { setC(x.code); setPr(null); }} />)}
             </ScrollView>
@@ -636,9 +914,11 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
               return (
                 <View key={f.id} style={{ borderTopWidth: 1, borderTopColor: C.br, paddingTop: 10, marginTop: 10 }}>
                   <View style={s.row}>
-                    <View style={{ flex: 1 }}>
+                    <Avatar driverId={f.driver_id} name={f.drivers?.display_name} size={50} />
+                    <View style={{ flex: 1, marginLeft: 10 }}>
                       <Text style={{ fontWeight: '700', fontSize: 16 }}>{f.drivers?.display_name} ★ {f.drivers?.rating_avg}</Text>
-                      <Mut>{f.drivers?.vehicles?.[0]?.model} · {f.drivers?.vehicles?.[0]?.plate} · llega en {f.eta_minutes} min</Mut>
+                      <Mut>{f.drivers?.vehicles?.[0]?.model} · {f.drivers?.vehicles?.[0]?.plate}</Mut>
+                      {f.eta_minutes != null && <Text style={{ color: C.p, fontWeight: '700', fontSize: 13 }}>Llega en {f.eta_minutes} min</Text>}
                       <Text style={{ fontSize: 12, color: r.payment_method === 'transferencia' && !f.drivers?.pay_info ? C.red : C.mut }}>{f.drivers?.pay_info ? '💳 Recibe transferencias' : r.payment_method === 'transferencia' ? '⚠️ No tiene cuenta para transferencias' : 'Cobra en efectivo'}</Text>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
@@ -669,20 +949,65 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
           <Card>
             <Text style={s.h}>{ST[r.status]}</Text>
             {rt.routes[rt.sel] && <Text style={{ fontWeight: '700', color: C.p }}>⏱️ {r.status === 'ongoing' ? 'Llegas' : 'Tu conductor llega'} en ~{mins(rt.routes[rt.sel].duration_traffic_s)} min · {(rt.routes[rt.sel].distance_m / 1000).toFixed(1)} km</Text>}
-            <Text style={{ fontWeight: '700' }}>{D.pd?.display_name} ★ {D.pd?.rating_avg} · {veh?.model} · {veh?.plate}</Text>
+            <View style={[s.row, { marginVertical: 8 }]}>
+              <Avatar driverId={r.driver_id} name={D.pd?.display_name} size={56} />
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={{ fontWeight: '800', fontSize: 16 }}>{D.pd?.display_name} ★ {D.pd?.rating_avg}</Text>
+                <Mut>{veh?.model}{veh?.color ? ' · ' + veh.color : ''}</Mut>
+              </View>
+              {veh?.plate ? <View style={s.plate}><Text style={{ fontWeight: '800', fontSize: 15, letterSpacing: 1 }}>{veh.plate}</Text></View> : null}
+            </View>
             <Mut>Tarifa acordada {$c(r.agreed_fare)} · {r.payment_method}. Peajes y tasas aparte; la tarifa no cambia durante el viaje.</Mut>
             {D.pay?.discount_amount > 0 && <Text style={{ color: C.d, fontWeight: '700' }}>Descuento −{$c(D.pay.discount_amount)} · Pagas {$c(D.pay.amount - D.pay.discount_amount)}</Text>}
             {PayBox()}
             <View style={[s.row, { marginTop: 10 }]}>
               <Btn t="🆘 Emergencia" color={C.red} small onPress={sos} />
-              <Btn t="📤 Compartir viaje" ghost small onPress={shareTrip} />
-              {r.status === 'accepted' && <Btn t="Cancelar" ghost small onPress={() => cancel(r.id)} />}
+              <Btn t="📤 Compartir viaje" ghost small onPress={() => setShareTo(true)} />
+              {r.status === 'accepted' && <Btn t="Cancelar" ghost small onPress={() => askCancel(r.id)} />}
             </View>
           </Card>
         )}
         {r && ['accepted', 'arrived', 'ongoing'].includes(r.status) && <Chat rideId={r.id} uid={uid} who={D.pd?.display_name || 'tu conductor'} />}
         <Report uid={uid} rideId={r?.id} />
       </ScrollView>
+      <MapPicker open={picker === 'd'} onClose={() => setPicker(null)} start={d || o} priced from={o} cfg={cfg} cat={cats[c]} catCode={c}
+        onConfirm={(g, p) => { setDest(g); setDq(g.name); setPr(p); setPicker(null); }} />
+      <MapPicker open={picker === 'o'} onClose={() => setPicker(null)} start={o} title="Mueve el mapa hasta donde te recogen"
+        onConfirm={g => { setO(g); setOq(g.name); setPr(null); setPicker(null); setEditO(false); }} confirmText="Confirmar punto de recogida" />
+      <Sheet open={help} onClose={() => setHelp(false)} title="Ayuda durante el viaje">
+        {r && <View style={[s.row, { marginBottom: 12 }]}>
+          <Avatar driverId={r.driver_id} name={D.pd?.display_name} size={48} />
+          <View style={{ flex: 1, marginLeft: 10 }}><Text style={{ fontWeight: '800' }}>{D.pd?.display_name}</Text><Mut>{veh?.model} {veh?.color || ''} · {veh?.plate}</Mut></View>
+        </View>}
+        <T style={s.mItem} onPress={() => { setHelp(false); setTimeout(() => setShareTo(true), 300); }}><Text style={{ fontSize: 20, width: 34 }}>📤</Text><View style={{ flex: 1 }}><Text style={{ fontWeight: '700' }}>Compartir mi viaje</Text><Mut>Envía un enlace para que te sigan en vivo</Mut></View></T>
+        <T style={s.mItem} onPress={() => { setHelp(false); sos(); }}><Text style={{ fontSize: 20, width: 34 }}>🆘</Text><View style={{ flex: 1 }}><Text style={{ fontWeight: '700', color: C.red }}>Emergencia</Text><Mut>Avisa al centro de operaciones de CERQUITA</Mut></View></T>
+        <T style={s.mItem} onPress={() => Linking.openURL('tel:123')}><Text style={{ fontSize: 20, width: 34 }}>📞</Text><View style={{ flex: 1 }}><Text style={{ fontWeight: '700' }}>Llamar al 123</Text><Mut>Línea de emergencias de Colombia</Mut></View></T>
+      </Sheet>
+      <Sheet open={shareTo} onClose={() => setShareTo(false)} title="Compartir mi viaje">
+        <Mut>Quien reciba el enlace verá en vivo dónde va el carro, el conductor y la placa. El enlace deja de funcionar cuando termina el viaje.</Mut>
+        <View style={{ height: 10 }} />
+        <Contacts onPick={x => shareTrip(x)} />
+        <Btn t="WhatsApp (elegir chat)" color={C.d} onPress={() => shareTrip(null)} style={{ marginTop: 12 }} />
+        <Btn t="Otro…" ghost onPress={() => shareTrip('other')} style={{ marginTop: 8 }} />
+      </Sheet>
+      <Popup open={arrOpen} onClose={() => setArrOpen(false)} icon="🚕" iconBg="#e7f6ed" title="Tu conductor llegó" btn="Ya voy" color={C.d}>
+        <Text style={{ textAlign: 'center', color: C.fg }}>{D.pd?.display_name || 'Tu conductor'} te espera en el punto de recogida.</Text>
+        {veh && <Text style={{ textAlign: 'center', marginTop: 6 }}>{veh.model} {veh.color || ''} · <Text style={{ fontWeight: '800' }}>{veh.plate}</Text></Text>}
+        {waitEnd && <View style={{ backgroundColor: C.bg, borderRadius: 12, padding: 10, marginTop: 12, alignItems: 'center' }}>
+          <Mut>Espera gratis</Mut>
+          <Text style={{ fontSize: 28, fontWeight: '800', color: waitEnd > tick ? C.fg : C.red }}>{fmtLeft(new Date(waitEnd).toISOString(), tick)}</Text>
+        </View>}
+      </Popup>
+      <Popup open={!!warn} onClose={() => setWarn(null)} icon="⚠️" iconBg="#fff4e0" title={warn >= 4 ? 'Revisaremos tu cuenta' : 'Cuidado con las cancelaciones'} color="#d98200">
+        <Text style={{ textAlign: 'center', color: C.fg }}>Has cancelado <Text style={{ fontWeight: '800' }}>{warn} viajes</Text> con conductor asignado en los últimos 30 días.</Text>
+        <Text style={{ textAlign: 'center', color: C.mut, marginTop: 8 }}>{warn >= 4 ? 'Avisamos al equipo de CERQUITA. Tu cuenta puede ser suspendida temporalmente.' : 'Si vuelves a cancelar, tu cuenta podría ser suspendida. Los conductores pierden tiempo y dinero cuando se cancela un viaje.'}</Text>
+      </Popup>
+      <Popup open={suspOpen} onClose={() => setSuspOpen(false)} icon="⛔" iconBg="#fdecee" title="Cuenta suspendida" color={C.red}>
+        <Text style={{ textAlign: 'center', color: C.fg }}>No puedes pedir viajes {untilTxt(susp.passenger_until)}.</Text>
+        {!!leftTxt(susp.passenger_until) && <Text style={{ textAlign: 'center', fontWeight: '800', fontSize: 18, marginTop: 8 }}>{leftTxt(susp.passenger_until)}</Text>}
+        {!!susp.passenger_reason && <Text style={{ textAlign: 'center', color: C.mut, marginTop: 8 }}>Motivo: {susp.passenger_reason}</Text>}
+        <Text style={{ textAlign: 'center', color: C.mut, marginTop: 8 }}>Si crees que es un error, escríbenos en Menú ☰ › Ayuda y soporte.</Text>
+      </Popup>
     </View>
   );
 }
@@ -877,7 +1202,89 @@ function Req({ r, mine, pos, onOffer, onHide }) {
   );
 }
 
+// ===== Zonas bloqueadas del conductor =====
+const ZSIZES = [[500, '500 m'], [1000, '1 km'], [2000, '2 km'], [3000, '3 km']];
+function ZoneEditor({ open, onClose, start, onSave }) {
+  const [ctr, setCtr] = useState(null), [nm, setNm] = useState(''), [rad, setRad] = useState(1000), [bp, setBp] = useState(true), [bd, setBd] = useState(false);
+  const mr = useRef(null);
+  useEffect(() => { if (open && start) { setCtr({ lat: start.lat, lng: start.lng }); setNm(''); setRad(1000); setBp(true); setBd(false); } }, [open]);
+  useEffect(() => { if (open && ctr) mr.current?.animateToRegion({ latitude: ctr.lat, longitude: ctr.lng, latitudeDelta: rad / 25000, longitudeDelta: rad / 25000 }, 300); }, [rad]);
+  if (!open || !start) return null;
+  const Check = ({ on, t, sub, onPress }) => <T onPress={onPress} style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8 }}><View style={{ width: 24, height: 24, borderRadius: 6, borderWidth: 2, borderColor: on ? C.d : C.br, backgroundColor: on ? C.d : C.card, alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>{on && <Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text>}</View><View style={{ flex: 1 }}><Text style={{ fontWeight: '700' }}>{t}</Text><Mut>{sub}</Mut></View></T>;
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: C.bg }}>
+        <View style={{ flex: 1 }}>
+          <MapView ref={mr} provider={PROVIDER_GOOGLE} style={{ flex: 1 }} showsUserLocation initialRegion={{ latitude: start.lat, longitude: start.lng, latitudeDelta: .05, longitudeDelta: .05 }} onRegionChangeComplete={g => setCtr({ lat: g.latitude, lng: g.longitude })}>
+            {ctr && <Circle center={pt(ctr)} radius={rad} strokeColor="rgba(217,45,58,0.9)" fillColor="rgba(217,45,58,0.2)" strokeWidth={2} />}
+          </MapView>
+          <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}><Text style={{ fontSize: 22, color: C.red }}>✛</Text></View>
+          <T onPress={onClose} style={s.backBtn}><Text style={{ fontSize: 22 }}>←</Text></T>
+          <View style={s.addrTop}><Text style={{ fontWeight: '700' }}>Mueve el mapa hasta el centro de la zona</Text></View>
+        </View>
+        <View style={s.sheet}>
+          <Input placeholder="Nombre de la zona (ej: Barrio X)" value={nm} onChangeText={setNm} maxLength={40} />
+          <Mut>Tamaño</Mut>
+          <View style={{ flexDirection: 'row', marginVertical: 6 }}>{ZSIZES.map(([v, l]) => <Chip key={v} t={l} on={rad === v} color={C.red} onPress={() => setRad(v)} />)}</View>
+          <Check on={bp} t="No recoger aquí" sub="No te llegan solicitudes que empiecen en esta zona" onPress={() => setBp(!bp)} />
+          <Check on={bd} t="No llevar hasta aquí" sub="No te llegan solicitudes que terminen en esta zona" onPress={() => setBd(!bd)} />
+          <Btn t="Guardar zona" color={C.d} style={{ marginTop: 8 }} onPress={() => {
+            if (!nm.trim()) return Alert.alert('CERQUITA', 'Ponle un nombre a la zona.');
+            if (!bp && !bd) return Alert.alert('CERQUITA', 'Elige al menos una opción: no recoger o no llevar.');
+            onSave({ name: nm.trim(), lat: ctr.lat, lng: ctr.lng, radius_m: rad, block_pickup: bp, block_dropoff: bd });
+          }} />
+        </View>
+      </View>
+    </Modal>
+  );
+}
+function Zones({ drv, pos, open, onClose }) {
+  const [list, setList] = useState([]), [edit, setEdit] = useState(false), [start, setStart] = useState(null);
+  const load = useCallback(async () => { const d = await q(supabase.from('driver_blocked_zones').select('*').eq('driver_id', drv.id).order('created_at')); if (d) setList(d); }, [drv.id]);
+  useEffect(() => { if (open) load(); }, [open, load]);
+  const add = async () => {
+    let p = pos;
+    if (!p) { try { const l = (await Location.getLastKnownPositionAsync()) || (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })); p = { lat: l.coords.latitude, lng: l.coords.longitude }; } catch (e) {} }
+    if (!p) return Alert.alert('CERQUITA', 'Activa el GPS para elegir la zona en el mapa.');
+    setStart(p); setEdit(true);
+  };
+  const save = async z => { if (await m(supabase.from('driver_blocked_zones').insert({ ...z, driver_id: drv.id }))) { setEdit(false); load(); } };
+  const toggle = async z => { if (await m(supabase.from('driver_blocked_zones').update({ active: !z.active }).eq('id', z.id))) load(); };
+  const del = z => Alert.alert('Borrar zona', `¿Borrar «${z.name}»?`, [{ text: 'No', style: 'cancel' }, { text: 'Borrar', style: 'destructive', onPress: async () => { if (await m(supabase.from('driver_blocked_zones').delete().eq('id', z.id))) load(); } }]);
+  const lbl = z => [z.block_pickup && 'No recoger', z.block_dropoff && 'No llevar'].filter(Boolean).join(' · ');
+  return (
+    <>
+      <Sheet open={open && !edit} onClose={onClose} title="Zonas bloqueadas">
+        <Mut>No recibirás solicitudes que empiecen o terminen en estas zonas. Puedes pausarlas cuando quieras.</Mut>
+        {list.length > 0 && <MapView provider={PROVIDER_GOOGLE} style={{ height: 180, borderRadius: 12, marginVertical: 10 }} initialRegion={{ latitude: list[0].lat, longitude: list[0].lng, latitudeDelta: .12, longitudeDelta: .12 }}>
+          {list.map(z => <Circle key={z.id} center={pt(z)} radius={z.radius_m} strokeColor={z.active ? 'rgba(217,45,58,0.9)' : 'rgba(120,120,120,0.7)'} fillColor={z.active ? 'rgba(217,45,58,0.2)' : 'rgba(120,120,120,0.15)'} strokeWidth={2} />)}
+        </MapView>}
+        {list.length === 0 && <Text style={{ color: C.mut, marginVertical: 12 }}>Aún no tienes zonas bloqueadas.</Text>}
+        {list.map(z => (
+          <View key={z.id} style={s.offer}>
+            <View style={{ flex: 1 }}><Text style={{ fontWeight: '700' }}>{z.name}</Text><Mut>{z.radius_m >= 1000 ? z.radius_m / 1000 + ' km' : z.radius_m + ' m'} · {lbl(z)}</Mut></View>
+            <Chip t={z.active ? 'Activa' : 'Pausada'} on={z.active} color={C.d} onPress={() => toggle(z)} />
+            <T onPress={() => del(z)} style={{ padding: 6 }}><Text style={{ fontSize: 18 }}>🗑️</Text></T>
+          </View>
+        ))}
+        <Btn t="+ Agregar zona" color={C.d} onPress={add} style={{ marginTop: 12 }} />
+      </Sheet>
+      <ZoneEditor open={edit} start={start} onClose={() => setEdit(false)} onSave={save} />
+    </>
+  );
+}
+
 function Driver({ uid, cfg, cats, D, refresh }) {
+  const [zonesOpen, setZonesOpen] = useState(false);
+  const ds = D.susp || {};
+  const dSusp = ds.driver_until && (isForever(ds.driver_until) || new Date(ds.driver_until) > new Date());
+  const SuspCard = () => <View style={{ backgroundColor: '#fdecee', borderColor: '#f3b8bf', borderWidth: 1, borderRadius: 14, padding: 14, marginBottom: 10 }}>
+    <Text style={{ color: C.red, fontWeight: '800', fontSize: 16 }}>⛔ Cuenta de conductor suspendida</Text>
+    <Text style={{ color: C.fg, marginTop: 4 }}>No puedes conectarte ni enviar ofertas {untilTxt(ds.driver_until)}.</Text>
+    {!!leftTxt(ds.driver_until) && <Text style={{ fontWeight: '700', marginTop: 4 }}>{leftTxt(ds.driver_until)}</Text>}
+    {!!ds.driver_reason && <Text style={{ color: C.fg, marginTop: 4 }}>Motivo: {ds.driver_reason}</Text>}
+    <Mut>Si crees que es un error, escríbenos en Menú ☰ › Ayuda y soporte.</Mut>
+  </View>;
   const drv = D.drv;
   const [f, setF] = useState({ name: '', cat: 'carro', model: '', plate: '', color: '' }), [hid, setHid] = useState([]), [pos, setPos] = useState(null);
   useEffect(() => {
@@ -977,7 +1384,7 @@ function Driver({ uid, cfg, cats, D, refresh }) {
       </Card>
     </ScrollView>
   );
-  if (drv.status !== 'approved') return <ScrollView contentContainerStyle={{ padding: 12 }} keyboardShouldPersistTaps="handled"><Card><Text style={s.h}>{drv.display_name}</Text><Text>{drv.status === 'pending' ? (drv.submitted ? 'Tu solicitud está en revisión. Te avisaremos cuando te aprueben.' : 'Para enviar tu solicitud sube tu foto y todos los documentos del vehículo. Son obligatorios.') : `Estado de tu cuenta: ${{ rejected: 'rechazada', suspended: 'suspendida' }[drv.status]}. Escríbenos si crees que es un error.`}</Text></Card>{drv.status === 'pending' && <Docs drv={drv} docs={D.docs} refresh={refresh} />}</ScrollView>;
+  if (drv.status !== 'approved') return <ScrollView contentContainerStyle={{ padding: 12 }} keyboardShouldPersistTaps="handled">{dSusp && <SuspCard />}<Card><Text style={s.h}>{drv.display_name}</Text><Text>{drv.status === 'pending' ? (drv.submitted ? 'Tu solicitud está en revisión. Te avisaremos cuando te aprueben.' : 'Para enviar tu solicitud sube tu foto y todos los documentos del vehículo. Son obligatorios.') : `Estado de tu cuenta: ${{ rejected: 'rechazada', suspended: 'suspendida' }[drv.status]}. Escríbenos si crees que es un error.`}</Text></Card>{drv.status === 'pending' && <Docs drv={drv} docs={D.docs} refresh={refresh} />}</ScrollView>;
 
   const gross = (D.dh || []).reduce((a, x) => a + x.amount, 0), net = gross - (D.dh || []).reduce((a, x) => a + x.commission_amount, 0), v = drv.vehicles?.[0], cur = D.cur;
   if (cur) return <DriverTrip cur={cur} pos={pos} next={next} uid={uid} payInfo={drv.pay_info} />;
@@ -992,6 +1399,7 @@ function Driver({ uid, cfg, cats, D, refresh }) {
         </MapView>
       )}
       <ScrollView contentContainerStyle={{ padding: 12 }} keyboardShouldPersistTaps="handled">
+        {dSusp && <SuspCard />}
         <View style={s.row}>
           <Card><Mut>Ganancias netas</Mut><Text style={s.kpi}>{$c(net)}</Text></Card>
           <Card><Mut>Servicios</Mut><Text style={s.kpi}>{(D.dh || []).length}</Text></Card>
@@ -1002,8 +1410,10 @@ function Driver({ uid, cfg, cats, D, refresh }) {
         <Card>
           <Text style={{ fontWeight: '700' }}>{v?.model} · {v?.plate} · {cats[drv.category]?.name}</Text>
           <Mut>{D.plan ? `Plan ${D.plan.plans?.name} · comisión ${D.plan.plans?.commission_pct}% · vence ${new Date(D.plan.ends_at).toLocaleDateString('es-CO')}` : `Comisión general ${cfg.commission_pct}%`}</Mut>
-          <Btn t={drv.online ? 'Desconectarme' : 'Conectarme'} color={drv.online ? C.red : C.d} onPress={online} style={{ marginTop: 8 }} />
+          <Btn t={drv.online ? 'Desconectarme' : 'Conectarme'} color={drv.online ? C.red : C.d} onPress={() => (dSusp && !drv.online ? Alert.alert('Cuenta suspendida', `No puedes conectarte ${untilTxt(ds.driver_until)}.`) : online())} style={{ marginTop: 8 }} />
+          <Btn t="🚫 Zonas bloqueadas" ghost small onPress={() => setZonesOpen(true)} style={{ marginTop: 8 }} />
         </Card>
+        <Zones drv={drv} pos={pos} open={zonesOpen} onClose={() => setZonesOpen(false)} />
         {cur ? (
           <Card>
             <Text style={s.h}>{ST[cur.status]}</Text>
@@ -1039,4 +1449,16 @@ const s = StyleSheet.create({
   price: { fontSize: 28, fontWeight: '800', color: C.fg },
   kpi: { fontSize: 18, fontWeight: '800', color: C.fg },
   offer: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.br },
+  burger: { width: 42, height: 42, borderRadius: 21, backgroundColor: C.card, borderWidth: 1, borderColor: C.br, alignItems: 'center', justifyContent: 'center' },
+  drawer: { width: '80%', maxWidth: 340, backgroundColor: C.card, paddingHorizontal: 18, paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) : 50 },
+  mItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: '#eef1f4' },
+  sheet: { backgroundColor: C.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 16, paddingBottom: 24, maxHeight: '85%' },
+  dim: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  popup: { backgroundColor: C.card, borderRadius: 20, padding: 20, width: '100%', maxWidth: 380 },
+  popIcon: { width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', alignSelf: 'center', marginBottom: 10 },
+  backBtn: { position: 'absolute', top: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 8 : 54, left: 12, width: 44, height: 44, borderRadius: 22, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center', elevation: 4 },
+  addrTop: { position: 'absolute', top: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 8 : 54, left: 66, right: 12, backgroundColor: C.card, borderRadius: 12, padding: 10, elevation: 4 },
+  etaBox: { position: 'absolute', top: 10, left: 10, backgroundColor: C.p, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 8, elevation: 4 },
+  shield: { position: 'absolute', right: 10, bottom: 10, width: 50, height: 50, borderRadius: 25, backgroundColor: C.card, alignItems: 'center', justifyContent: 'center', elevation: 5 },
+  plate: { borderWidth: 2, borderColor: C.fg, backgroundColor: '#ffd84d', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
 });
