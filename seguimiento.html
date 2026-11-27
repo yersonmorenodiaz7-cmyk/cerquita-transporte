@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>CERQUITA · Viaje en vivo</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--p:#1769ff;--d:#12a150;--fg:#10181f;--mut:#66727e;--br:#dfe4e9;--red:#d92d3a}
+*{box-sizing:border-box}html,body{margin:0;height:100%;font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--fg);background:#f4f6f8}
+#map{position:fixed;inset:0 0 auto 0;height:62vh}
+.top{position:fixed;top:12px;left:12px;right:12px;z-index:500;display:flex;align-items:center;gap:8px}
+.brand{background:#fff;border-radius:12px;padding:8px 12px;font-weight:800;color:var(--p);box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.live{background:var(--d);color:#fff;border-radius:12px;padding:6px 10px;font-size:13px;font-weight:700}
+.live.off{background:#8a96a1}
+.sheet{position:fixed;left:0;right:0;bottom:0;min-height:40vh;background:#fff;border-radius:20px 20px 0 0;padding:18px 18px 26px;box-shadow:0 -4px 16px rgba(0,0,0,.12);z-index:600}
+.st{font-size:20px;font-weight:800;margin:0 0 4px}.mut{color:var(--mut);font-size:13px}
+.drv{display:flex;align-items:center;gap:12px;margin:14px 0}
+.av{width:52px;height:52px;border-radius:50%;background:#e7f6ed;color:#0c7a3b;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:22px}
+.plate{margin-left:auto;border:2px solid var(--fg);background:#ffd84d;border-radius:6px;padding:4px 10px;font-weight:800;letter-spacing:1px}
+.route{border-top:1px solid var(--br);padding-top:10px}
+.route div{display:flex;gap:8px;align-items:flex-start;margin:6px 0}
+.dot{width:10px;height:10px;border-radius:50%;margin-top:6px;flex:none}
+.msg{max-width:420px;margin:30vh auto;text-align:center;padding:0 20px}
+.car{font-size:30px;line-height:30px;filter:drop-shadow(0 2px 2px rgba(0,0,0,.3))}
+</style></head>
+<body>
+<div id="map"></div>
+<div class="top"><div class="brand">📍 CERQUITA</div><div id="live" class="live">● En vivo</div></div>
+<div class="sheet" id="sh"><p class="mut">Cargando el viaje…</p></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const SUPABASE_URL='https://bwcluuunbaxpmdpscekg.supabase.co';
+const SUPABASE_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ3Y2x1dXVuYmF4cG1kcHNjZWtnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMzODM3NDYsImV4cCI6MjEwODk1OTc0Nn0.0Pi0yGf_fHVBjWJJdlkxO6yVvEa1_RBY4-izbsMCDCs';
+const E=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const tok=new URLSearchParams(location.search).get('t')||'';
+const ST={accepted:'El conductor va por el pasajero',arrived:'El conductor llegó al punto de recogida',ongoing:'En viaje hacia el destino'};
+let map,car,first=true,timer;
+function end(t,sub){clearInterval(timer);document.getElementById('map').style.display='none';document.querySelector('.top').style.display='none';
+  document.body.innerHTML=`<div class="msg"><div style="font-size:48px">📍</div><h2>${t}</h2><p class="mut">${sub}</p></div>`}
+async function load(){
+  if(!tok)return end('Enlace incompleto','Pide que te envíen el enlace de nuevo.');
+  let d;
+  try{const r=await fetch(SUPABASE_URL+'/rest/v1/rpc/get_shared_trip',{method:'POST',headers:{apikey:SUPABASE_KEY,Authorization:'Bearer '+SUPABASE_KEY,'Content-Type':'application/json'},body:JSON.stringify({p_token:tok})});d=await r.json()}
+  catch(e){document.getElementById('live').className='live off';document.getElementById('live').textContent='Sin conexión';return}
+  if(!d||d.status==='not_found')return end('Enlace no válido','Este enlace no existe o fue escrito mal.');
+  if(d.status==='ended'||!ST[d.status])return end('El viaje terminó','Este enlace ya no muestra la ubicación porque el viaje finalizó o fue cancelado.');
+  document.getElementById('live').className='live';document.getElementById('live').textContent='● En vivo';
+  const o=[d.origin_lat,d.origin_lng],ds=[d.dest_lat,d.dest_lng];
+  if(!map){map=L.map('map',{zoomControl:false}).setView(o,14);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+    L.circleMarker(o,{radius:8,color:'#fff',weight:3,fillColor:'#12a150',fillOpacity:1}).addTo(map).bindTooltip('Recogida');
+    L.circleMarker(ds,{radius:8,color:'#fff',weight:3,fillColor:'#d92d3a',fillOpacity:1}).addTo(map).bindTooltip('Destino')}
+  if(d.lat&&d.lng){const p=[d.lat,d.lng];if(!car)car=L.marker(p,{icon:L.divIcon({className:'',html:'<div class="car">🚕</div>',iconSize:[30,30],iconAnchor:[15,15]})}).addTo(map);else car.setLatLng(p);
+    if(first){map.fitBounds([p,d.status==='ongoing'?ds:o],{padding:[50,50]});first=false}}
+  else if(first){map.fitBounds([o,ds],{padding:[50,50]});first=false}
+  const upd=d.updated_at?Math.max(0,Math.round((Date.now()-new Date(d.updated_at))/1000)):null;
+  document.getElementById('sh').innerHTML=`<p class="st">${ST[d.status]}</p><p class="mut">${E(d.passenger||'Tu contacto')} compartió este viaje contigo${upd!=null?` · ubicación de hace ${upd<60?upd+' s':Math.round(upd/60)+' min'}`:''}</p>
+  <div class="drv"><div class="av">${E((d.driver||'?').trim().charAt(0).toUpperCase())}</div><div><b>${E(d.driver||'Conductor')}</b> ${d.rating?'★ '+E(d.rating):''}<div class="mut">${E(d.model||'')} ${E(d.color||'')}</div></div>${d.plate?`<div class="plate">${E(d.plate)}</div>`:''}</div>
+  <div class="route"><div><span class="dot" style="background:var(--d)"></span><span>${E(d.origin_name)}</span></div><div><span class="dot" style="background:var(--red)"></span><span>${E(d.dest_name)}</span></div></div>
+  <p class="mut" style="margin-top:12px">Si crees que hay una emergencia, llama al 123.</p>`;
+}
+load();timer=setInterval(load,5000);
+</script></body></html>
