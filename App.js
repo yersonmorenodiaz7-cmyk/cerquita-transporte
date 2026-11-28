@@ -165,37 +165,72 @@ export default function App() {
   );
 }
 
+// Campo del ingreso (definido fuera para que el teclado no se cierre al escribir)
+const Field = ({ icon, children, right }) => <View style={s.aField}><Text style={{ fontSize: 17, marginRight: 8 }}>{icon}</Text><View style={{ flex: 1 }}>{children}</View>{right}</View>;
 function Auth() {
-  const [up, setUp] = useState(false), [email, setEmail] = useState(''), [pass, setPass] = useState(''), [name, setName] = useState(''), [busy, setBusy] = useState(false);
+  // Pantallas: 'w' bienvenida, 'in' ingresar, 'up' crear cuenta (estilo inDrive; mismo correo y contraseña de siempre)
+  const [scr, setScr] = useState('w'), [email, setEmail] = useState(''), [pass, setPass] = useState(''), [name, setName] = useState(''), [phone, setPhone] = useState(''), [busy, setBusy] = useState(false), [show, setShow] = useState(false), [ok, setOk] = useState(false);
+  const up = scr === 'up';
+  const errEs = msg => /invalid login/i.test(msg) ? 'Correo o contraseña incorrectos.' : /not confirmed/i.test(msg) ? 'Tu correo aún no está confirmado. Revisa tu bandeja de entrada (y la carpeta de spam).' : /already registered|already exists/i.test(msg) ? 'Ese correo ya tiene una cuenta. Toca «Ingresar».' : msg;
   const go = async () => {
-    if (!email || pass.length < 8) return Alert.alert('CERQUITA', 'Escribe tu correo y una contraseña de mínimo 8 caracteres.');
+    if (!email.trim() || pass.length < 8) return Alert.alert('CERQUITA', 'Escribe tu correo y una contraseña de mínimo 8 caracteres.');
+    if (up) {
+      if (name.trim().length < 3) return Alert.alert('CERQUITA', 'Escribe tu nombre completo.');
+      if (phone.replace(/\D/g, '').length !== 10) return Alert.alert('CERQUITA', 'Escribe tu celular de 10 números (ej: 3001234567).');
+      if (!ok) return Alert.alert('CERQUITA', 'Para crear tu cuenta debes aceptar los Términos y la Política de privacidad.');
+    }
     setBusy(true);
-    if (!up) { const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pass }); if (error) Alert.alert('CERQUITA', error.message); }
+    if (!up) { const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pass }); if (error) Alert.alert('CERQUITA', errEs(error.message)); }
     else {
-      const { data, error } = await supabase.auth.signUp({ email: email.trim(), password: pass, options: { data: { full_name: name } } });
-      if (error) Alert.alert('CERQUITA', error.message); else if (!data.session) Alert.alert('CERQUITA', 'Cuenta creada. Revisa tu correo para confirmarla y luego ingresa.');
+      const cel = '+57' + phone.replace(/\D/g, '');
+      const { data, error } = await supabase.auth.signUp({ email: email.trim(), password: pass, options: { data: { full_name: name.trim(), phone: cel } } });
+      if (error) Alert.alert('CERQUITA', errEs(error.message));
+      else if (!data.session) { Alert.alert('CERQUITA', 'Cuenta creada. Revisa tu correo para confirmarla y luego ingresa.'); setScr('in'); }
     }
     setBusy(false);
   };
   const forgot = async () => {
-    if (!email.trim()) return Alert.alert('CERQUITA', 'Escribe tu correo arriba y vuelve a tocar este enlace.');
+    if (!email.trim()) return Alert.alert('CERQUITA', 'Escribe tu correo arriba y vuelve a tocar «¿Olvidaste tu contraseña?».');
     const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: WEB + 'reset.html' });
     Alert.alert('CERQUITA', error ? error.message : 'Te enviamos un correo con un enlace para crear una nueva contraseña.');
   };
+  const top = Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 16 : 60;
+  const fieldTxt = { fontSize: 16, color: C.fg, paddingVertical: 12 };
+  if (scr === 'w') return (
+    <ScrollView contentContainerStyle={{ flexGrow: 1, padding: 24, paddingTop: top, backgroundColor: C.card }}>
+      <Text style={[s.logo, { fontSize: 24 }]}>📍 CERQUITA</Text>
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 260 }}>
+        <View style={{ width: 230, height: 230, borderRadius: 115, backgroundColor: '#e8f0ff', alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ fontSize: 96 }}>🚕</Text>
+          <View style={{ position: 'absolute', top: 30, right: 18, backgroundColor: C.d, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 5 }}><Text style={{ color: '#fff', fontWeight: '800' }}>$ tu precio</Text></View>
+          <Text style={{ position: 'absolute', bottom: 34, left: 30, fontSize: 36 }}>📍</Text>
+        </View>
+      </View>
+      <Text style={{ fontSize: 30, fontWeight: '800', color: C.fg, lineHeight: 36 }}>Viaja al precio que tú propones</Text>
+      <Text style={{ color: C.mut, fontSize: 15, marginTop: 8, marginBottom: 24 }}>Movilidad, cercanía, confianza y rapidez en tu ciudad</Text>
+      <T onPress={() => setScr('in')} style={[s.aBig, { backgroundColor: C.d }]}><Text style={s.aBigT}>Ingresar</Text></T>
+      <T onPress={() => setScr('up')} style={[s.aBig, { backgroundColor: C.card, borderWidth: 1.5, borderColor: C.br, marginTop: 10 }]}><Text style={[s.aBigT, { color: C.fg }]}>Crear cuenta</Text></T>
+    </ScrollView>
+  );
   return (
-    <ScrollView contentContainerStyle={{ padding: 20, paddingTop: 80 }} keyboardShouldPersistTaps="handled">
-      <Text style={[s.logo, { fontSize: 32 }]}>📍 CERQUITA</Text>
-      <Mut>Movilidad, cercanía, confianza y rapidez</Mut>
-      <Card>
-        <Text style={s.h}>{up ? 'Crear cuenta' : 'Ingresar'}</Text>
-        {up && <Input placeholder="Nombre completo" value={name} onChangeText={setName} />}
-        <Input placeholder="Correo" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" />
-        <Input placeholder="Contraseña" value={pass} onChangeText={setPass} secureTextEntry />
-        <Btn t={busy ? 'Un momento…' : up ? 'Registrarme' : 'Entrar'} onPress={go} />
-        <Btn t={up ? 'Ya tengo cuenta' : 'Crear cuenta'} ghost onPress={() => setUp(!up)} style={{ marginTop: 8 }} />
-        {!up && <T onPress={forgot}><Text style={{ color: C.p, textAlign: 'center', marginTop: 14 }}>¿Olvidaste tu contraseña?</Text></T>}
-        <Text style={{ color: C.mut, fontSize: 12, textAlign: 'center', marginTop: 14 }}>Al crear tu cuenta aceptas los <Text style={{ color: C.p }} onPress={() => Linking.openURL(WEB + 'terminos.html')}>Términos y condiciones</Text> y la <Text style={{ color: C.p }} onPress={() => Linking.openURL(WEB + 'privacidad.html')}>Política de privacidad</Text>.</Text>
-      </Card>
+    <ScrollView contentContainerStyle={{ flexGrow: 1, padding: 24, paddingTop: top, backgroundColor: C.card }} keyboardShouldPersistTaps="handled">
+      <T onPress={() => setScr('w')} style={{ width: 44, height: 44, justifyContent: 'center', marginBottom: 10 }} accessibilityLabel="Volver"><Text style={{ fontSize: 26, color: C.fg }}>←</Text></T>
+      <Text style={{ fontSize: 28, fontWeight: '800', color: C.fg }}>{up ? 'Crea tu cuenta' : 'Ingresa a tu cuenta'}</Text>
+      <Text style={{ color: C.mut, fontSize: 15, marginTop: 6, marginBottom: 22 }}>{up ? 'Solo toma un minuto.' : 'Con el correo y la contraseña que registraste.'}</Text>
+      {up && <Field icon="👤"><TextInput style={fieldTxt} placeholder="Nombre completo" placeholderTextColor={C.mut} value={name} onChangeText={setName} autoCapitalize="words" /></Field>}
+      {up && <View style={s.aField}><Text style={{ fontSize: 16, color: C.fg, fontWeight: '700', paddingRight: 10, marginRight: 10, borderRightWidth: 1, borderRightColor: C.br }}>🇨🇴 +57</Text><TextInput style={[fieldTxt, { flex: 1 }]} placeholder="300 123 4567" placeholderTextColor={C.mut} value={phone} onChangeText={t => setPhone(t.replace(/[^0-9 ]/g, '').slice(0, 13))} keyboardType="phone-pad" /></View>}
+      <Field icon="✉️"><TextInput style={fieldTxt} placeholder="correo@ejemplo.com" placeholderTextColor={C.mut} value={email} onChangeText={setEmail} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" /></Field>
+      <Field icon="🔒" right={<T onPress={() => setShow(v => !v)} style={{ padding: 6 }} accessibilityLabel={show ? 'Ocultar contraseña' : 'Ver contraseña'}><Text style={{ fontSize: 18 }}>{show ? '🙈' : '👁️'}</Text></T>}>
+        <TextInput style={fieldTxt} placeholder={up ? 'Contraseña (mínimo 8)' : 'Contraseña'} placeholderTextColor={C.mut} value={pass} onChangeText={setPass} secureTextEntry={!show} autoCapitalize="none" onSubmitEditing={go} />
+      </Field>
+      {!up && <T onPress={forgot} style={{ alignSelf: 'flex-end', paddingVertical: 4 }}><Text style={{ color: C.p, fontWeight: '600' }}>¿Olvidaste tu contraseña?</Text></T>}
+      {up && <T onPress={() => setOk(v => !v)} style={{ flexDirection: 'row', alignItems: 'flex-start', marginTop: 4 }}>
+        <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: ok ? C.d : C.br, backgroundColor: ok ? C.d : C.card, alignItems: 'center', justifyContent: 'center', marginRight: 10, marginTop: 1 }}>{ok && <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>✓</Text>}</View>
+        <Text style={{ flex: 1, color: C.mut, fontSize: 13 }}>Acepto los <Text style={{ color: C.p }} onPress={() => Linking.openURL(WEB + 'terminos.html')}>Términos y condiciones</Text> y la <Text style={{ color: C.p }} onPress={() => Linking.openURL(WEB + 'privacidad.html')}>Política de privacidad</Text>.</Text>
+      </T>}
+      <View style={{ flex: 1, minHeight: 24 }} />
+      <T onPress={busy ? undefined : go} style={[s.aBig, { backgroundColor: C.d, opacity: busy ? 0.7 : 1 }]}>{busy ? <ActivityIndicator color="#fff" /> : <Text style={s.aBigT}>{up ? 'Crear mi cuenta' : 'Entrar'}</Text>}</T>
+      <T onPress={() => setScr(up ? 'in' : 'up')} style={{ paddingVertical: 14 }}><Text style={{ textAlign: 'center', color: C.mut, fontSize: 14 }}>{up ? '¿Ya tienes cuenta? ' : '¿No tienes cuenta? '}<Text style={{ color: C.p, fontWeight: '700' }}>{up ? 'Ingresa aquí' : 'Créala aquí'}</Text></Text></T>
     </ScrollView>
   );
 }
@@ -1543,6 +1578,9 @@ const s = StyleSheet.create({
   price: { fontSize: 28, fontWeight: '800', color: C.fg },
   kpi: { fontSize: 18, fontWeight: '800', color: C.fg },
   offer: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.br },
+  aField: { flexDirection: 'row', alignItems: 'center', borderWidth: 1.5, borderColor: C.br, backgroundColor: '#f7f9fb', borderRadius: 14, paddingHorizontal: 12, marginBottom: 12 },
+  aBig: { borderRadius: 16, paddingVertical: 16, alignItems: 'center', justifyContent: 'center' },
+  aBigT: { color: '#fff', fontSize: 17, fontWeight: '800' },
   burger: { width: 42, height: 42, borderRadius: 21, backgroundColor: C.card, borderWidth: 1, borderColor: C.br, alignItems: 'center', justifyContent: 'center' },
   drawer: { width: '80%', maxWidth: 340, backgroundColor: C.card, paddingHorizontal: 18, paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) : 50 },
   mItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: '#eef1f4' },
