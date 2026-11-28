@@ -1,0 +1,8 @@
+# Archivos que NO se envían a Expo al compilar.
+# Importante: google-services.json NO está aquí a propósito; la compilación lo necesita para las notificaciones.
+node_modules/
+.expo/
+dist/
+*.apk
+*.aab
+.env
