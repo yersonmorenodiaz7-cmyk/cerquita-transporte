@@ -968,7 +968,8 @@ function Passenger({ uid, cfg, cats, D, refresh }) {
                     <Avatar driverId={f.driver_id} name={f.drivers?.display_name} size={50} />
                     <View style={{ flex: 1, marginLeft: 10 }}>
                       <Text style={{ fontWeight: '700', fontSize: 16 }}>{f.drivers?.display_name} ★ {f.drivers?.rating_avg}</Text>
-                      <Mut>{f.drivers?.vehicles?.[0]?.model} · {f.drivers?.vehicles?.[0]?.plate}</Mut>
+                      <Text style={{ color: C.fg, fontSize: 13 }}>{f.drivers?.vehicles?.[0]?.model}{f.drivers?.vehicles?.[0]?.color ? ' · ' + f.drivers.vehicles[0].color.trim() : ''}</Text>
+                      {!!f.drivers?.vehicles?.[0]?.plate && <View style={[s.plate, { alignSelf: 'flex-start', marginVertical: 3, paddingVertical: 1 }]}><Text style={{ fontWeight: '800', fontSize: 13, letterSpacing: 1 }}>{f.drivers.vehicles[0].plate}</Text></View>}
                       {f.eta_minutes != null && <Text style={{ color: C.p, fontWeight: '700', fontSize: 13 }}>Llega en {f.eta_minutes} min</Text>}
                       <Text style={{ fontSize: 12, color: r.payment_method === 'transferencia' && !f.drivers?.pay_info ? C.red : C.mut }}>{f.drivers?.pay_info ? '💳 Recibe transferencias' : r.payment_method === 'transferencia' ? '⚠️ No tiene cuenta para transferencias' : 'Cobra en efectivo'}</Text>
                     </View>
@@ -1254,6 +1255,46 @@ function Req({ r, mine, pos, onOffer, onHide }) {
   );
 }
 
+// ===== Foto de perfil del conductor (la ve el pasajero en la oferta y en el viaje) =====
+function DriverPhoto({ drv, docs = [], refresh }) {
+  const [busy, setBusy] = useState(false), [ver, setVer] = useState(0);
+  const f = [...docs].reverse().find(d => d.doc_type === 'foto' && d.status !== 'rejected');
+  const rejected = !f && docs.some(d => d.doc_type === 'foto' && d.status === 'rejected');
+  const take = async camera => {
+    try {
+      const perm = camera ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) return Alert.alert('CERQUITA', 'Necesito permiso para usar la cámara o tus fotos.');
+      const opt = { base64: true, quality: 0.6, allowsEditing: true, aspect: [1, 1] };
+      const res = camera ? await ImagePicker.launchCameraAsync({ ...opt, cameraType: ImagePicker.CameraType.front }) : await ImagePicker.launchImageLibraryAsync({ ...opt, mediaTypes: ['images'] });
+      if (res.canceled || !res.assets?.[0]?.base64) return;
+      setBusy(true);
+      const path = `${drv.user_id}/foto-${Date.now()}.jpg`;
+      const up = await supabase.storage.from('driver-docs').upload(path, b64ToBuffer(res.assets[0].base64), { contentType: 'image/jpeg' });
+      if (up.error) throw up.error;
+      if (await m(supabase.from('driver_documents').insert({ driver_id: drv.id, doc_type: 'foto', storage_path: path }))) { Alert.alert('CERQUITA', 'Foto guardada. Los pasajeros la verán en tus ofertas.'); setVer(v => v + 1); }
+      refresh();
+    } catch (e) { Alert.alert('CERQUITA', e.message || 'No se pudo subir la foto.'); }
+    setBusy(false);
+  };
+  return (
+    <View style={[s.card, !f && { borderColor: '#f3b8bf', backgroundColor: '#fff7f8' }]}>
+      <View style={s.row}>
+        <Avatar key={ver + (f?.created_at || '')} driverId={f ? drv.id : null} name={drv.display_name} size={64} />
+        <View style={{ flex: 1, marginLeft: 10 }}>
+          <Text style={{ fontWeight: '800', fontSize: 16, color: f ? C.fg : C.red }}>{f ? 'Tu foto de perfil' : '📷 Sube tu foto para conectarte'}</Text>
+          <Mut>{f ? 'Los pasajeros ven tu foto, tu vehículo, el color y la placa antes de aceptar tu oferta.' : rejected ? 'Tu foto anterior fue rechazada. Toma una nueva: de frente, con buena luz y sin gafas oscuras ni gorra.' : 'Es obligatoria: los pasajeros la ven antes de aceptar tu oferta. De frente, con buena luz y sin gafas oscuras ni gorra.'}</Mut>
+        </View>
+      </View>
+      {busy ? <ActivityIndicator color={C.d} style={{ marginTop: 10 }} /> : (
+        <View style={[s.row, { marginTop: 10 }]}>
+          <Btn t={f ? '🤳 Cambiar foto' : '🤳 Tomar selfie'} color={C.d} small onPress={() => take(true)} style={{ flex: 1 }} />
+          <Btn t="🖼️ Galería" ghost small onPress={() => take(false)} />
+        </View>
+      )}
+    </View>
+  );
+}
+
 // ===== Zonas bloqueadas del conductor =====
 const ZSIZES = [[500, '500 m'], [1000, '1 km'], [2000, '2 km'], [3000, '3 km']];
 function ZoneEditor({ open, onClose, start, onSave }) {
@@ -1457,12 +1498,13 @@ function Driver({ uid, cfg, cats, D, refresh }) {
           <Card><Mut>Servicios</Mut><Text style={s.kpi}>{(D.dh || []).length}</Text></Card>
           <Card><Mut>Calificación</Mut><Text style={s.kpi}>★ {drv.rating_avg}</Text></Card>
         </View>
+        <DriverPhoto drv={drv} docs={D.docs} refresh={refresh} />
         <Wallet drv={drv} wallet={D.wallet} cfg={cfg} refresh={refresh} />
         <PayInfo drv={drv} refresh={refresh} />
         <Card>
           <Text style={{ fontWeight: '700' }}>{v?.model} · {v?.plate} · {cats[drv.category]?.name}</Text>
           <Mut>{D.plan ? `Plan ${D.plan.plans?.name} · comisión ${D.plan.plans?.commission_pct}% · vence ${new Date(D.plan.ends_at).toLocaleDateString('es-CO')}` : `Comisión general ${cfg.commission_pct}%`}</Mut>
-          <Btn t={drv.online ? 'Desconectarme' : 'Conectarme'} color={drv.online ? C.red : C.d} onPress={() => (dSusp && !drv.online ? Alert.alert('Cuenta suspendida', `No puedes conectarte ${untilTxt(ds.driver_until)}.`) : online())} style={{ marginTop: 8 }} />
+          <Btn t={drv.online ? 'Desconectarme' : 'Conectarme'} color={drv.online ? C.red : C.d} onPress={() => (dSusp && !drv.online ? Alert.alert('Cuenta suspendida', `No puedes conectarte ${untilTxt(ds.driver_until)}.`) : !drv.online && !(D.docs || []).some(d => d.doc_type === 'foto' && d.status !== 'rejected') ? Alert.alert('Falta tu foto', 'Sube tu foto de perfil (arriba, «Tomar selfie») para poder conectarte. Los pasajeros la ven antes de aceptar tu oferta.') : online())} style={{ marginTop: 8 }} />
           <Btn t="🚫 Zonas bloqueadas" ghost small onPress={() => setZonesOpen(true)} style={{ marginTop: 8 }} />
         </Card>
         <Zones drv={drv} pos={pos} open={zonesOpen} onClose={() => setZonesOpen(false)} />
